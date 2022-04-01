@@ -2,7 +2,7 @@
 
 These scripts are designed to scrape data from various sources (including the MPFI register*) so journalists and the public can easily analyse the second job income of Members of Parliament.
 
-The project uses spaCy named entity recognition (NER) models to pull data from the unstructured MPFI register.
+The project uses custom-trained spaCy named entity recognition (NER) models to pull data from the unstructured MPFI register.
 
 For now, sheets are exported as .xlsx files with the date as the filename (e.g. 220228.xlsx). The MPFI register is updated every two weeks.
 
