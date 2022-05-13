@@ -1,39 +1,65 @@
-# Register of Members' (MPs) Financial Interests - structured
+# MP Second Jobs Scanner
 
-These scripts are designed to scrape data from various sources (including the MPFI register*) so journalists and the public can easily analyse the second job income of Members of Parliament.
+__Ever wanted to know how much your MP is earning per year on top of their £81K+* parliamentary salary? And from who? What about the number of hours they spend working in those second jobs?__
 
-The project uses custom-trained spaCy named entity recognition (NER) models to pull data from the unstructured MPFI register.
+That information is publicly available in [The Register of Members' Financial Interests](https://publications.parliament.uk/pa/cm/cmregmem/contents2122.htm)... but it doesn't really answer these questions, or any of the questions people really want to know, because it isn't organised to help you do that. 
 
-For now, sheets are exported as .xlsx files with the date as the filename (e.g. 220228.xlsx). The MPFI register is updated every two weeks.
+The MP Second Jobs Scanner was built so these questions can be easily answered and, more generally, to parse the wordy and disconnected information in the Register into something more useful to everyone. It turns Register entries for all 650 Members of Parliament into structured and searchable spreadsheets.
 
-**Open up 220228.xlsx to see structured data from the MPFI register dated 28th February 2022. More dates coming soon.**
+With the data produced by the Scanner you can now, at a quick glance, see how much your local MP has earned in the last year from secondary sources of income, check how many hours they've worked, who they've been working for, or whatever else you might be interested in. You can also compare MPs and filter by fields such as their political party, geography, years in office, and their % majority.
 
-*https://publications.parliament.uk/pa/cm/cmregmem/contents2122.htm
+This resource is open-source and free to use for members of the public, journalists, data scientists, researchers, and whoever else might be interested. **I would love to hear what it's being used for! Drop me a quick email at andrew@andrewkmessios.com and tell me about it :)**
 
-## Files
+_*As of April 2022, MPs now earn £84,411 per year, compared to £81,932 in 2020-21. The scanner uses the 2020-21 salary as total second job earnings are summed year-to-date._
 
-For now, this project has not been uploaded to fork, so many of the necessary files are missing (e.g. the ner models and pkl files I've used). These are listed below.
+![Screenshot - MP Overview](./readme_files/screenshot1.jpg)
+![Screenshot2 - Earnings breakdown](./readme_files/screenshot2.jpg)
 
-**main.py** scrapers
+## The data
 
-**training.py** script for training new data for spacy models
+The Scanner uses machine-learning with custom-trained [NER](https://monkeylearn.com/blog/named-entity-recognition/) models to extract structured data from the Register, which is updated every two weeks. It also pulls information from other sources such as IPSA, ParallelParliament, and DBpedia. 
 
-**testing.py** where i test new functions
+The data is exported as excel spreadsheets saved in the **/excel** folder. Each spreadsheet is named after the corresponding date of the Register entry _e.g._ 3rd of May 2022 = 220503.xlsx 
 
-### from .gitignore -
+**_NB: While the MPFI scraper works perfectly 99% of the time, it will on occasion miss or miscategorise data resulting in errors. If something looks off, it might well be. Please do some due dilligence and double-check the data yourself against the original source. And if there are any glaring errors, please let me know._**
 
-**admin/** nothing interesting, notes etc
+## Running the MPFI scraper yourself
 
-**excel/** excel files exported by scrapers
+If you want to run the Scanner yourself, go for it. It's pretty easy. While it works well, sometimes it does hit a bug which you might have to go and fix. I do this myself for the final spreadsheets in the **/excel** folder but if you want to do the scraping then you'll have to! Feel free to get in touch if you have any questions about it.
 
-**old_files/** old versions of scrapers
+* First, find the date of the Register you wish to scrape from [this page](https://publications.parliament.uk/pa/cm/cmregmem/contents2122.htm).
 
-**ner_models/** ner models (too big to upload here)
+* Second, clone this git repo and then run from the command line:
 
-**pkl/** pkl files, mostly dicts which capture the data first time to avoid repeat scraping
+        C:\git-repo> python3 main.py "short-date" "long-date"
 
-**training_data/** text files used to train spaCy ner models
+    _long-date_ takes the date written as DD MMMM YYYY e.g. "3 May 2022"<br>
+    _short-date_ takes the date written as YYMMDD e.g. "220503"
 
-**testing.py** where i test new functions
+    For example:
 
-**base_config.cfg / config.cfg / train.spacy** config files not included for now
+        C:\git-repo> python3 main.py "220503" "3 May 2022"
+
+    ...will scrape the Register entry for the [3rd of May 2022](https://publications.parliament.uk/pa/cm/cmregmem/220503/contents.htm) and create a new spreadsheet 220503.xlsx saved in **/excel**.
+
+* Third, keep an eye on the scanner as it's running on the command line. Sometimes it'll hit a line from the Register it doesn't fully understand and you'll have to enter the date, sum, and time values yourself.
+
+    ![Screenshot - Manual input for extraction](./readme_files/screenshot3.jpg)
+
+## Files & Folders
+
+**main.py** main scrapers and scripts
+
+**training.py** script for training new data for custom spaCy NER models
+
+**/excel** spreadsheets named by date of the corresponding Register entry (YYMMDD.xlsx)
+
+**/ner_models** custom NER models managed by git LFS
+
+**/pkl** pkl files managed by git LFS (_NB:_ only permanent pkl files are included here, although others are created by running the MPFI scraper)
+
+**/training** raw training data created with training.py, used to train custom NER models
+
+## Contact
+
+If you have any suggestions or questions please feel free to contact me - **andrew@andrewkmessios.com**

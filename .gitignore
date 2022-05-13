@@ -1,14 +1,13 @@
 # MY FILES
-admin/
-excel/
-old_files/
-ner_models/
-pkl/
-training_data/
 testing.py
-base_config.cfg
-config.cfg
-train.spacy
+test.xlsx
+notes.txt
+mps_data2.code-workspace
+.vscode/
+pkl/dict_mpfi.pkl
+pkl/dict_name_urls.pkl
+pkl/dict_parsed_lines.pkl
+bonus_round.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

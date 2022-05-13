@@ -1,579 +1,672 @@
-import pickle, requests, os, spacy, time, datefinder, datetime, dateutil, re, num2words
-import pandas as pd, numpy as np
+import pickle, requests, os, spacy, time, datefinder, datetime, dateutil, re, urllib.parse, sys
+from pydantic import Extra
+import pandas as pd
 from bs4 import BeautifulSoup
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.edge.options import Options
 from selenium.webdriver.common.by import By
 from dateutil.parser import parse
 from tqdm import tqdm
 from word2number import w2n
 
-#########################
-## 1. SCRAPE AND STORE ##
-#########################
+class Config:
+    """
+    date
+        -> date to scrape ('yymmdd')
 
-# Link scrapers
-def get_mp_urls_and_names(date): ## {'abbott_diane.htm':'Abbot, Ms Diane', 'abrahams_debbie.htm':'Abrahams, Debbie', ...}
-    url = 'https://publications.parliament.uk/pa/cm/cmregmem/'+date+'/contents.htm'
+    selenium_path
+        -> path to selenium Edge drivers
 
-    page = requests.get(url)
-    soup = BeautifulSoup(page.content, "lxml")
+    categories_dict
+    -> a dictionary which contains the categories used in The Register of Members' Financial Interests
+        -> e.g. {'c1':'1. Employment and earnings'}
+    """ 
 
-    p_tags = soup.find_all('p', attrs={'class':None, 'xmlns':'http://www.w3.org/1999/xhtml'})
+    selenium_path = r"C:/selenium_drivers/edgedriver_win64_101"
+    selenium_options = Options()
+    selenium_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.41 Safari/537.36 Edg/101.0.1210.32")
 
-    dict_mplink_name = {}
-    for tag in p_tags:
-        try:
-            dict_mplink_name[tag.a['href']] = tag.get_text().strip()
-        except:
-            pass 
+    categories_dict = {
+        'c1': '1. Employment and earnings',
+        'c2a': '2. (a) Support linked to an MP but received by a local party organisation or indirectly via a central party organisation',
+        'c2b': '2. (b) Any other support not included in Category 2(a)',
+        'c3': '3. Gifts, benefits and hospitality from UK sources',
+        'c4': '4. Visits outside the UK',
+        'c5': '5. Gifts and benefits from sources outside the UK',
+        'c6': '6. Land and property portfolio: (i) value over £100,000 and/or (ii) giving rental income of over £10,000 a year',
+        'c7i': '7. (i) Shareholdings: over 15% of issued share capital',
+        'c7ii': '7. (ii) Other shareholdings, valued at more than £70,000',
+        'c8': '8. Miscellaneous',
+        'c9': '9. Family members employed and paid from parliamentary expenses',
+        'c10': '10. Family members engaged in lobbying the public sector on behalf of a third party or client'
+    }
 
-    dict_mplink_name_file = open('./pkl/dict_mplink_name.pkl', 'wb')
-    pickle.dump(dict_mplink_name, dict_mplink_name_file)
-    dict_mplink_name_file.close()
+class Scrape:
+    """
+    The Scraper class contains the individual scrapers used to populate the MP class instances and create the final spreadsheets
 
-    return dict_mplink_name
-
-def get_pplinks(): ## dict_mplink_pplink {'abbott_diane.htm':'www.parallelparliament.co.uk/mp/diane-abbott', ...}
-    dict_mplink_pplink = {}
-    dict_mplink_name = pickle.load(open('./pkl/dict_mplink_name.pkl','rb'))
-
-    pp_url = 'https://www.parallelparliament.co.uk/mp/'
-
-    for mplink in tqdm(list(dict_mplink_name.keys())):
-        pp_mplink = str(mplink.replace('.htm','').split('_')[1]+'-'+mplink.replace('.htm','').split('_')[0])
-        dict_mplink_pplink[mplink] = pp_url+pp_mplink
+    constituencies() -> None
+        -> scrapes parliament.uk to create a pkl file which stores geography information
+        -> creates ./pkl/dict_constituencies.pkl
+        -> only needs to be run once (this information won't change)
+        -> saved as a dictionary in the format: {'constituency1': ('region', 'country'), 'constituency2': ('region', 'country'), ...}
     
-    dict_mplink_pplink['dines_sarah.htm'] = 'https://www.parallelparliament.co.uk/mp/miss-sarah-dines'
-    dict_mplink_pplink['qaisar_anum.htm'] = 'https://www.parallelparliament.co.uk/mp/anum-qaisar-javed'
-    dict_mplink_pplink['davey_ed.htm'] = 'https://www.parallelparliament.co.uk/mp/edward-davey'
+    all_links(date) -> None
+        -> scrapes indexes from all web sources (parluk, pp, wiki, ipsa, db) to create a dict of all the individual mp urls needed
+        -> creates ./pkl/dict_name_urls.pkl
+        -> run it every time there's a new update on The Register (bi-weekly)
+        -> saved as a dict with structure: {
+                                            'mp1url':{'name': name,
+                                                    'parlukurl': parlukurl,
+                                                    'ppurl':ppurl,
+                                                    'wikiurl':wikiurl,
+                                                    'ipsaurl':ipsaurl,
+                                                    'dburl':dburl
+                                                    },
+                                            'mp2url':{
+                                                    ...
+                                                    },
+                                            ...
+                                            }
+    mpfi(mpurl) -> None:
+        -> scrapes latest update of The Register once and stores it in a pkl to avoid repeat scraping
+            -> if mpurl=None: runs for all mps
+            -> if mpurl: only runs and updates for the individual mpurl
+        -> creates ./pkl/dict_mpfi.pkl
+        -> run it every time there's a new update on The Register (bi-weekly)
+        -> pkl is structured according to category and with indent information (useful when parsing later)
+        -> saved as a dict with structure: {
+                                            'mp1url':{
+                                                    '1. Employment and earnings': [('i','line'),('i2','line'), ...],
+                                                    '4. Visits outside the UK': [('i','line'),('i2','line'), ...],
+                                                    'x. ...': [(i,),(i,),(i,),...],
+                                                    },
+                                            'mp2url':{
+                                                    ...
+                                                    },
+                                            ...
+                                            }
 
-    ## save dict_mplink_pplink to file so I don't have to scrape every time.
-    dict_mplink_pplink_file = open('./pkl/dict_mplink_pplink.pkl', 'wb')
-    pickle.dump(dict_mplink_pplink, dict_mplink_pplink_file)
-    dict_mplink_pplink_file.close()
+    """
 
-def get_wikilinks(): ## dict_mplink_wikilink {'abbott_diane.htm':'www.wikipedia.org/Diane_Abbott', ...}
-    dict_mplink_wikilink = {}
-    dict_mplink_name = pickle.load(open('./pkl/dict_mplink_name.pkl','rb'))
+    def constituencies() -> None:
+        os.environ['PATH'] = Config.selenium_path
 
-    os.environ['PATH'] = r"C:/selenium_drivers/edgedriver_win64_99"
-    driver = webdriver.Edge()
+        filter_list = ['Conservative','Labour','Green Party','Liberal Democrat',
+            'Independent','Speaker','Plaid Cymru','Democratic Unionist Party',
+            'Sinn Féin','Social Democratic & Labour Party','Alliance'] 
+            ## need to filter out elements picked up by scraper which aren't constituencies
 
-    for mplink in tqdm(list(dict_mplink_name.keys())):
-        wiki_url = 'https://en.wikipedia.org/wiki/'+str(mplink.replace('.htm','').split('_')[1]+'_'+mplink.replace('.htm','').split('_')[0]).title()
-        driver.get(wiki_url)
-        page = driver.page_source
-        wiki_soup = BeautifulSoup(page, 'html.parser')
+        dict_constituencies = {}
 
-        if wiki_soup.find('a', title='Member of Parliament (United Kingdom)'): ## ensures it's the right page - i.e. it's the MP, not someone else by the same name
-            dict_mplink_wikilink[mplink] = wiki_url
-        else:
-            for _link in ['_(MP)','_(British_politician)','_(politician)','_(English_politician)','_(London_politician)','_(Scottish_politician)','_(Labour_politician)','_(Conservative_politician)']: 
-                wiki_url = 'https://en.wikipedia.org/wiki/'+str(mplink.replace('.htm','').split('_')[1]+'_'+mplink.replace('.htm','').split('_')[0]).title()+_link
-                wiki_page = requests.get(wiki_url)
-                wiki_soup = BeautifulSoup(wiki_page.content, 'html.parser')
-                if wiki_soup.find('a', title='Member of Parliament (United Kingdom)'):
-                    dict_mplink_wikilink[mplink] = wiki_url
-                    break
+        # get england regions
+        england_url = 'https://members.parliament.uk/region/Region/'
+        england_regions = ['South East','West Midlands','North West','East Midlands','London',
+        'Yorkshire and The Humber','East of England', 'South West', 'North East']
+
+        for region in england_regions:
+            driver = webdriver.Edge(options=Config.selenium_options) ## Slow, I know, but I get CAPTCHA'd if I don't open/close the browser every time
+            driver.get(england_url+region)
+
+            elements = driver.find_elements(By.CLASS_NAME,'primary-info')
+            for item in elements:
+                if item.text not in filter_list:
+                    dict_constituencies[item.text] = (region,'England')        
+
+            driver.close()
+
+        #s,w,ni regions
+        other_url = 'https://members.parliament.uk/region/Country/'
+        other_regions = ['Scotland', 'Northern Ireland', 'Wales']
+
+        for region in other_regions:
+            driver = webdriver.Edge()
+            driver.get(other_url+region)
+
+            elements = driver.find_elements(By.CLASS_NAME,'primary-info')
+            for item in elements:
+                if item.text not in filter_list:
+                    dict_constituencies[item.text] = (region,region)
+
+            driver.close()
+        
+        # write dict_constituencies to pkl file
+        dict_constituencies_file = open('./pkl/dict_constituencies.pkl', 'wb')
+        pickle.dump(dict_constituencies, dict_constituencies_file)
+        dict_constituencies_file.close()
+
+    def links(date: str) -> None:
+
+        def parluk(date) -> dict: # -> {'mpurl':('name','parlukurl'), ...}
+            url = 'https://publications.parliament.uk/pa/cm/cmregmem/'+date+'/contents.htm'
+            os.environ['PATH'] = Config.selenium_path
+            driver = webdriver.Edge(options=Config.selenium_options)
+
+            driver.get(url)
+            time.sleep(5)
+
+            p_tags = driver.find_elements(By.TAG_NAME, 'p')
+
+            # delete p's which are headers etc
+            i = 0
+            while i <= 7:
+                del p_tags[0]
+                i += 1
+            time.sleep(5)
+
+            # capture parlukurl / name in dict
+            dict_parlukurl_name = {}
+            for p_tag in tqdm(p_tags, desc="Parliament.uk"):
+                a_tags = p_tag.find_elements(By.TAG_NAME, 'a')
+                if len(a_tags) == 1:
+                    parlukurl = a_tags[0].get_attribute('href')
+                    name = a_tags[0].text.strip()
+                if len(a_tags) == 2:
+                    parlukurl = a_tags[1].get_attribute('href')
+                    name = a_tags[1].text.strip()
+                mpurl = urllib.parse.unquote(parlukurl.replace('https://publications.parliament.uk/pa/cm/cmregmem/'+date+'/','').replace('.htm',''))
+                dict_parlukurl_name[mpurl] = (urllib.parse.unquote(name),urllib.parse.unquote(parlukurl))
+            
+            driver.close()
+
+            return dict_parlukurl_name
+
+        def pp(dict) -> dict: # -> {'mpurl':'ppurl', ...}
+            dict_url_nameparlukurl = dict
+
+            dict_ppurl = {}
+            for mpurl in tqdm(dict_url_nameparlukurl.keys(), desc="ParallelParliament"):
+                pp_url = str(mpurl.split('_')[1]+'-'+mpurl.split('_')[0])
+                dict_ppurl[mpurl] = urllib.parse.unquote('https://www.parallelparliament.co.uk/mp/'+pp_url)
+            
+            dict_ppurl['dines_sarah'] = 'https://www.parallelparliament.co.uk/mp/miss-sarah-dines'
+            dict_ppurl['qaisar_anum'] = 'https://www.parallelparliament.co.uk/mp/anum-qaisar-javed'
+            dict_ppurl['davey_ed'] = 'https://www.parallelparliament.co.uk/mp/edward-davey'
+
+            return dict_ppurl
+
+        def wiki(dict) -> dict: # -> {'mpurl':'wikiurl', ...}
+            dict_wikiurls = {}
+            dict_url_nameparlukurl = dict
+
+            os.environ['PATH'] = Config.selenium_path
+            driver = webdriver.Edge(options=Config.selenium_options)
+
+            for mpurl in tqdm(dict_url_nameparlukurl.keys(), desc="Wikipedia.org"):
+                wiki_url = 'https://en.wikipedia.org/wiki/'+str(mpurl.replace('.htm','').split('_')[1]+'_'+mpurl.replace('.htm','').split('_')[0]).title()
+                driver.get(wiki_url)
+                page = driver.page_source
+                wiki_soup = BeautifulSoup(page, 'html.parser')
+
+                if wiki_soup.find('a', title='Member of Parliament (United Kingdom)'): ## ensures it's the right page - i.e. it's the MP, not someone else by the same name
+                    dict_wikiurls[mpurl] = urllib.parse.unquote(wiki_url)
                 else:
-                    if _link == '_(Conservative_politician)':
-                        dict_mplink_wikilink[mplink] = ''
-                        break
+                    for _link in ['_(MP)','_(British_politician)','_(politician)','_(English_politician)','_(London_politician)','_(Scottish_politician)','_(Labour_politician)','_(Conservative_politician)']: 
+                        wiki_url = 'https://en.wikipedia.org/wiki/'+str(mpurl.replace('.htm','').split('_')[1]+'_'+mpurl.replace('.htm','').split('_')[0]).title()+_link
+                        wiki_page = requests.get(wiki_url)
+                        wiki_soup = BeautifulSoup(wiki_page.content, 'html.parser')
+                        if wiki_soup.find('a', title='Member of Parliament (United Kingdom)'):
+                            dict_wikiurls[mpurl] = urllib.parse.unquote(wiki_url)
+                            break
+                        else:
+                            if _link == '_(Conservative_politician)':
+                                dict_wikiurls[mpurl] = ''
+                                break
+                            else:
+                                pass
+            
+            driver.close()
+                
+            dict_wikiurls['bailey_shaun'] = 'https://en.wikipedia.org/wiki/Shaun_Bailey_(West_Bromwich_MP)'
+            dict_wikiurls['begley_órfhlaith'] = urllib.parse.unquote('https://en.wikipedia.org/wiki/Órfhlaith_Begley')
+            dict_wikiurls['brown_nicholas'] = 'https://en.wikipedia.org/wiki/Nick_Brown'
+            dict_wikiurls['davies_david-t-c'] = 'https://en.wikipedia.org/wiki/David_T._C._Davies'
+            dict_wikiurls['de-cordova_marsha'] = 'https://en.wikipedia.org/wiki/Marsha_de_Cordova'
+            dict_wikiurls['dhesi_tanmanjeet-singh'] = 'https://en.wikipedia.org/wiki/Tanmanjeet_Singh_Dhesi'
+            dict_wikiurls['donaldson_jeffrey-m'] = 'https://en.wikipedia.org/wiki/Jeffrey_Donaldson'
+            dict_wikiurls['dunne_philip'] = 'https://en.wikipedia.org/wiki/Philip_Dunne_(Ludlow_MP)'
+            dict_wikiurls['foy_mary-kelly'] = 'https://en.wikipedia.org/wiki/Mary_Foy_(politician)'
+            dict_wikiurls['gill_preet-kaur'] = 'https://en.wikipedia.org/wiki/Preet_Gill'
+            dict_wikiurls['holmes_paul'] = 'https://en.wikipedia.org/wiki/Paul_Holmes_(Eastleigh_MP)'
+            dict_wikiurls['howell_paul'] = 'https://en.wikipedia.org/wiki/Paul_Howell_(MP)'
+            dict_wikiurls['jones_david'] = 'https://en.wikipedia.org/wiki/David_Jones_(Clwyd_West_MP)'
+            dict_wikiurls['macneil_angus-brendan'] = 'https://en.wikipedia.org/wiki/Angus_MacNeil'
+            dict_wikiurls['mccabe_steve'] = 'https://en.wikipedia.org/wiki/Steve_McCabe'
+            dict_wikiurls['mccarthy_kerry'] = 'https://en.wikipedia.org/wiki/Kerry_McCarthy'
+            dict_wikiurls['mccartney_jason'] = 'https://en.wikipedia.org/wiki/Jason_McCartney_(politician)'
+            dict_wikiurls['mccartney_karl'] = 'https://en.wikipedia.org/wiki/Karl_McCartney'
+            dict_wikiurls['mcdonagh_siobhain'] = 'https://en.wikipedia.org/wiki/Siobhain_McDonagh'
+            dict_wikiurls['mcdonald_andy'] = 'https://en.wikipedia.org/wiki/Andy_McDonald_(politician)'
+            dict_wikiurls['mcdonald_stewart-malcolm'] = 'https://en.wikipedia.org/wiki/Stewart_McDonald_(politician)'
+            dict_wikiurls['mcdonald_stuart-c'] = 'https://en.wikipedia.org/wiki/Stuart_McDonald_(Scottish_politician)'
+            dict_wikiurls['mcdonnell_john'] = 'https://en.wikipedia.org/wiki/John_McDonnell'
+            dict_wikiurls['mcfadden_pat'] = 'https://en.wikipedia.org/wiki/Pat_McFadden'
+            dict_wikiurls['mcginn_conor'] = 'https://en.wikipedia.org/wiki/Conor_McGinn'
+            dict_wikiurls['mcgovern_alison'] = 'https://en.wikipedia.org/wiki/Alison_McGovern'
+            dict_wikiurls['mckinnell_catherine'] = 'https://en.wikipedia.org/wiki/Catherine_McKinnell'
+            dict_wikiurls['mclaughlin_anne'] = 'https://en.wikipedia.org/wiki/Anne_McLaughlin'
+            dict_wikiurls['mcmahon_jim'] = 'https://en.wikipedia.org/wiki/Jim_McMahon_(politician)'
+            dict_wikiurls['mcmorrin_anna'] = 'https://en.wikipedia.org/wiki/Anna_McMorrin'
+            dict_wikiurls['mcnally_john'] = 'https://en.wikipedia.org/wiki/John_McNally_(politician)'
+            dict_wikiurls['mcpartland_stephen'] = 'https://en.wikipedia.org/wiki/Stephen_McPartland'
+            dict_wikiurls['moore_robbie'] = 'https://en.wikipedia.org/wiki/Robbie_Moore_(MP)'
+            dict_wikiurls['neill_robert'] = 'https://en.wikipedia.org/wiki/Bob_Neill'
+            dict_wikiurls['obrien_neil'] = urllib.parse.unquote('https://en.wikipedia.org/wiki/Neil_O%27Brien')
+            dict_wikiurls['ohara_brendan'] = urllib.parse.unquote('https://en.wikipedia.org/wiki/Brendan_O%27Hara')
+            dict_wikiurls['paisley_ian'] = 'https://en.wikipedia.org/wiki/Ian_Paisley_Jr'
+            dict_wikiurls['wood_mike'] = 'https://en.wikipedia.org/wiki/Mike_Wood_(Conservative_politician)'
+
+            return dict_wikiurls
+
+        def ipsa() -> dict: # -> {'mpurl':'ipsaurl', ...}
+            url = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp'
+            os.environ['PATH'] = Config.selenium_path
+            driver = webdriver.Edge(options=Config.selenium_options)
+
+            driver.get(url)
+
+            buttons = driver.find_elements_by_class_name('govuk-accordion__section-button')
+            for button in tqdm(buttons, desc="theIPSA.org.uk"):
+                time.sleep(2)
+                button.click()
+            time.sleep(10)
+            
+            links = driver.find_elements_by_class_name('govuk-link')
+            ipsaurls = []
+            for link in links:
+                try:
+                    if '/mp-staffing-business-costs/your-mp/' in link.get_attribute('href'):
+                        ipsaurls.append(link.get_attribute('href'))
                     else:
                         pass
-    
-    driver.close()
-        
-    dict_mplink_wikilink['bailey_shaun.htm'] = 'https://en.wikipedia.org/wiki/Shaun_Bailey_(West_Bromwich_MP)'
-    dict_mplink_wikilink['brown_nicholas.htm'] = 'https://en.wikipedia.org/wiki/Nick_Brown'
-    dict_mplink_wikilink['davies_david-t-c.htm'] = 'https://en.wikipedia.org/wiki/David_T._C._Davies'
-    dict_mplink_wikilink['de-cordova_marsha.htm'] = 'https://en.wikipedia.org/wiki/Marsha_de_Cordova'
-    dict_mplink_wikilink['dhesi_tanmanjeet-singh.htm'] = 'https://en.wikipedia.org/wiki/Tanmanjeet_Singh_Dhesi'
-    dict_mplink_wikilink['donaldson_jeffrey-m.htm'] = 'https://en.wikipedia.org/wiki/Jeffrey_Donaldson'
-    dict_mplink_wikilink['dunne_philip.htm'] = 'https://en.wikipedia.org/wiki/Philip_Dunne_(Ludlow_MP)'
-    dict_mplink_wikilink['foy_mary-kelly.htm'] = 'https://en.wikipedia.org/wiki/Mary_Foy_(politician)'
-    dict_mplink_wikilink['gill_preet-kaur.htm'] = 'https://en.wikipedia.org/wiki/Preet_Gill'
-    dict_mplink_wikilink['holmes_paul.htm'] = 'https://en.wikipedia.org/wiki/Paul_Holmes_(Eastleigh_MP)'
-    dict_mplink_wikilink['howell_paul.htm'] = 'https://en.wikipedia.org/wiki/Paul_Howell_(MP)'
-    dict_mplink_wikilink['jones_david.htm'] = 'https://en.wikipedia.org/wiki/David_Jones_(Clwyd_West_MP)'
-    dict_mplink_wikilink['macneil_angus-brendan.htm'] = 'https://en.wikipedia.org/wiki/Angus_MacNeil'
-    dict_mplink_wikilink['mccabe_steve.htm'] = 'https://en.wikipedia.org/wiki/Steve_McCabe'
-    dict_mplink_wikilink['mccarthy_kerry.htm'] = 'https://en.wikipedia.org/wiki/Kerry_McCarthy'
-    dict_mplink_wikilink['mccartney_jason.htm'] = 'https://en.wikipedia.org/wiki/Jason_McCartney_(politician)'
-    dict_mplink_wikilink['mccartney_karl.htm'] = 'https://en.wikipedia.org/wiki/Karl_McCartney'
-    dict_mplink_wikilink['mcdonagh_siobhain.htm'] = 'https://en.wikipedia.org/wiki/Siobhain_McDonagh'
-    dict_mplink_wikilink['mcdonald_andy.htm'] = 'https://en.wikipedia.org/wiki/Andy_McDonald_(politician)'
-    dict_mplink_wikilink['mcdonald_stewart-malcolm.htm'] = 'https://en.wikipedia.org/wiki/Stewart_McDonald_(politician)'
-    dict_mplink_wikilink['mcdonald_stuart-c.htm'] = 'https://en.wikipedia.org/wiki/Stuart_McDonald_(Scottish_politician)'
-    dict_mplink_wikilink['mcdonnell_john.htm'] = 'https://en.wikipedia.org/wiki/John_McDonnell'
-    dict_mplink_wikilink['mcfadden_pat.htm'] = 'https://en.wikipedia.org/wiki/Pat_McFadden'
-    dict_mplink_wikilink['mcginn_conor.htm'] = 'https://en.wikipedia.org/wiki/Conor_McGinn'
-    dict_mplink_wikilink['mcgovern_alison.htm'] = 'https://en.wikipedia.org/wiki/Alison_McGovern'
-    dict_mplink_wikilink['mckinnell_catherine.htm'] = 'https://en.wikipedia.org/wiki/Catherine_McKinnell'
-    dict_mplink_wikilink['mclaughlin_anne.htm'] = 'https://en.wikipedia.org/wiki/Anne_McLaughlin'
-    dict_mplink_wikilink['mcmahon_jim.htm'] = 'https://en.wikipedia.org/wiki/Jim_McMahon_(politician)'
-    dict_mplink_wikilink['mcmorrin_anna.htm'] = 'https://en.wikipedia.org/wiki/Anna_McMorrin'
-    dict_mplink_wikilink['mcnally_john.htm'] = 'https://en.wikipedia.org/wiki/John_McNally_(politician)'
-    dict_mplink_wikilink['mcpartland_stephen.htm'] = 'https://en.wikipedia.org/wiki/Stephen_McPartland'
-    dict_mplink_wikilink['moore_robbie.htm'] = 'https://en.wikipedia.org/wiki/Robbie_Moore_(MP)'
-    dict_mplink_wikilink['neill_robert.htm'] = 'https://en.wikipedia.org/wiki/Bob_Neill'
-    dict_mplink_wikilink['obrien_neil.htm'] = 'https://en.wikipedia.org/wiki/Neil_O%27Brien'
-    dict_mplink_wikilink['ohara_brendan.htm'] = 'https://en.wikipedia.org/wiki/Brendan_O%27Hara'
-    dict_mplink_wikilink['paisley_ian.htm'] = 'https://en.wikipedia.org/wiki/Ian_Paisley_Jr'
-    dict_mplink_wikilink['wood_mike.htm'] = 'https://en.wikipedia.org/wiki/Mike_Wood_(Conservative_politician)'
-
-    ## save dict_mplink_wikilink to file so I don't have to scrape every time.
-    dict_mplink_wikilink_file = open('./pkl/dict_mplink_wikilink.pkl', 'wb')
-    pickle.dump(dict_mplink_wikilink, dict_mplink_wikilink_file)
-    dict_mplink_wikilink_file.close()
-
-def get_ipsalinks(): ## dict_mplink_ipsalink {'abbott_diane.htm':'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/diane-abbott/172', ...}
-    url = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp'
-    os.environ['PATH'] = r"C:/selenium_drivers/chromedriver_win32"
-
-    driver = webdriver.Chrome()
-    driver.get(url)
-
-    buttons = driver.find_elements_by_class_name('govuk-accordion__section-button')
-    for button in buttons:
-        driver.implicitly_wait(30)
-        button.click()
-    
-    driver.implicitly_wait(30)
-    links = driver.find_elements_by_class_name('govuk-link')
-    ipsalinks = []
-    for link in links:
-        try:
-            if '/mp-staffing-business-costs/your-mp/' in link.get_attribute('href'):
-                ipsalinks.append(link.get_attribute('href'))
-            else:
-                pass
-        except:
-            pass
-    
-    driver.implicitly_wait(30)
-    dict_mplink_ipsalink = {}
-    for link in ipsalinks:
-        ipsa_name = ''.join([i for i in link.replace('https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/','').replace('/','') if not i.isdigit()])
-        dict_mplink_ipsalink[ipsa_name.split('-')[1]+'_'+ipsa_name.split('-')[0]+'.htm'] = link
-
-    ## delete old mps from dict_mplink_ipsalink
-    driver.implicitly_wait(30)
-    dict_mplink_wikilink = pickle.load(open('./pkl/dict_mplink_wikilink.pkl','rb'))
-    new_links = list(set(list(dict_mplink_ipsalink.keys()))-set(list(dict_mplink_wikilink.keys())))
-    for link in list(dict_mplink_ipsalink.keys()):
-        if link in new_links:
-            del dict_mplink_ipsalink[link]
-
-    ## append correct ipsa links
-    driver.implicitly_wait(30)
-    dict_mplink_ipsalink['ahmad-khan_imran.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/imran-ahmad-khan/4841'
-    dict_mplink_ipsalink['allin-khan_rosena.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/rosena-allin-khan/4573'
-    dict_mplink_ipsalink['begley_órfhlaith.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/%C3%B3rfhlaith-begley/4697'
-    dict_mplink_ipsalink['clarke-smith_brendan.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/brendan-clarke-smith/4756'
-    dict_mplink_ipsalink['clifton-brown_geoffrey.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/geoffrey-clifton-brown/249'
-    dict_mplink_ipsalink['coffey_therese.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/th%C3%A9r%C3%A8se-coffey/4098'
-    dict_mplink_ipsalink['davies-jones_alex.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/alex-davies-jones/4849'
-    dict_mplink_ipsalink['davies_david-t-c.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/david-t-c-davies/1545'
-    dict_mplink_ipsalink['de-cordova_marsha.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/marsha-de-cordova/4676'
-    dict_mplink_ipsalink['dhesi_tanmanjeet-singh.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/tanmanjeet-singh-dhesi/4638'
-    dict_mplink_ipsalink['docherty-hughes_martin.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/martin-docherty-hughes/4374'
-    dict_mplink_ipsalink['donaldson_jeffrey-m.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/jeffrey-m-donaldson/650'
-    dict_mplink_ipsalink['doyle-price_jackie.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/jackie-doyle-price/4065'
-    dict_mplink_ipsalink['duncan-smith_iain.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/iain-duncan-smith/152'
-    dict_mplink_ipsalink['foy_mary-kelly.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/mary-kelly-foy/4753'
-    dict_mplink_ipsalink['gill_preet-kaur.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/preet-kaur-gill/4603'
-    dict_mplink_ipsalink['hart_sally-ann.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/sally-ann-hart/4842'
-    dict_mplink_ipsalink['heaton-harris_chris.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/chris-heaton-harris/3977'
-    dict_mplink_ipsalink['lewell-buck_emma.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/emma-lewell-buck/4277'
-    dict_mplink_ipsalink['liddell-grainger_ian.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/ian-liddell-grainger/1396'
-    dict_mplink_ipsalink['long-bailey_rebecca.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/rebecca-long-bailey/4396'
-    dict_mplink_ipsalink['macneil_angus-brendan.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/angus-brendan-macneil/1546'
-    dict_mplink_ipsalink['mcdonald_stewart-malcolm.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/stewart-malcolm-mcdonald/4461'
-    dict_mplink_ipsalink['mcdonald_stuart-c.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/stuart-c-mcdonald/4393'
-    dict_mplink_ipsalink['morris_anne-marie.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/anne-marie-morris/4249'
-    dict_mplink_ipsalink['mumby-croft_holly.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/holly-mumby-croft/4867'
-    dict_mplink_ipsalink['obrien_neil.htm'] = "https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/neil-o'brien/4679"
-    dict_mplink_ipsalink['ohara_brendan.htm'] = "https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/brendan-o'hara/4371"
-    dict_mplink_ipsalink['oppong-asare_abena.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/abena-oppong-asare/4820'
-    dict_mplink_ipsalink['rees-mogg_jacob.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/jacob-rees-mogg/4099'
-    dict_mplink_ipsalink['ribeiro-addy_bell.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/bell-ribeiro-addy/4764'
-    dict_mplink_ipsalink['russell-moyle_lloyd.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/lloyd-russell-moyle/4615'
-    dict_mplink_ipsalink['saville-roberts_liz.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/liz-saville-roberts/4521'
-    dict_mplink_ipsalink['thomas-symonds_nick.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/nick-thomas-symonds/4479'
-    dict_mplink_ipsalink['trevelyan_anne-marie.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/anne-marie-trevelyan/4531'
-    dict_mplink_ipsalink['zahawi_nadhim.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/nadhim-zahawi/4113'
-    dict_mplink_ipsalink['zeichner_daniel.htm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/daniel-zeichner/4382'
-
-    ## save dict_mplink_pplink to file so I don't have to scrape every time.
-    driver.implicitly_wait(30)
-    dict_mplink_ipsalink_file = open('./pkl/dict_mplink_ipsalink.pkl', 'wb')
-    pickle.dump(dict_mplink_ipsalink, dict_mplink_ipsalink_file)
-    dict_mplink_ipsalink_file.close()
-
-    driver.close()
-    return dict_mplink_ipsalink
-
-def get_dblinks(): ## dict_mplink_dblink {'abbott_diane.htm':'https://dbpedia.org/page/Diane_Abbott', ...}
-    dict_mplink_name = pickle.load(open('./pkl/dict_mplink_name.pkl','rb'))
-    dict_mplink_wikilink = pickle.load(open('./pkl/dict_mplink_wikilink.pkl','rb'))
-
-    dict_mplink_dblink = {}
-    for mplink in dict_mplink_name.keys():
-        dict_mplink_dblink[mplink] = dict_mplink_wikilink[mplink].replace('https://en.wikipedia.org/wiki/','https://dbpedia.org/page/')
-    
-    ## save dict_mplink_pplink to file so I don't have to scrape every time.
-    dict_mplink_dblink_file = open('./pkl/dict_mplink_dblink.pkl', 'wb')
-    pickle.dump(dict_mplink_dblink, dict_mplink_dblink_file)
-    dict_mplink_dblink_file.close()
-
-    return dict_mplink_dblink
-
-# Main scrapers
-date = '220228'
-headings_dict = {
-    'h1': '1. Employment and earnings',
-    'h2a': '2. (a) Support linked to an MP but received by a local party organisation or indirectly via a central party organisation',
-    'h2b': '2. (b) Any other support not included in Category 2(a)',
-    'h3': '3. Gifts, benefits and hospitality from UK sources',
-    'h4': '4. Visits outside the UK',
-    'h5': '5. Gifts and benefits from sources outside the UK',
-    'h6': '6. Land and property portfolio: (i) value over £100,000 and/or (ii) giving rental income of over £10,000 a year',
-    'h7i': '7. (i) Shareholdings: over 15% of issued share capital',
-    'h7ii': '7. (ii) Other shareholdings, valued at more than £70,000',
-    'h8': '8. Miscellaneous',
-    'h9': '9. Family members employed and paid from parliamentary expenses',
-    'h10': '10. Family members engaged in lobbying the public sector on behalf of a third party or client'
-}
-
-def scrape_mpinfo_political(indv_mplink=None): ## dict_mpinfo_political
-    dict_mplink_name = pickle.load(open("./pkl/dict_mplink_name.pkl", "rb"))
-    dict_mplink_wikilink = pickle.load(open("./pkl/dict_mplink_wikilink.pkl", "rb"))
-    dict_mplink_pplink = pickle.load(open("./pkl/dict_mplink_pplink.pkl", "rb"))
-    dict_mplink_ipsalink = pickle.load(open('./pkl/dict_mplink_ipsalink.pkl','rb'))
-    dict_constituencies = pickle.load(open('./pkl/dict_constituencies.pkl','rb'))
-
-    def indv_mp(mplink):        
-        # SCRAPE PARALLELPARLIAMENT.CO.UK
-        os.environ['PATH'] = r"C:/selenium_drivers/edgedriver_win64_99"
-        driver = webdriver.Edge()
-
-        pp_url = dict_mplink_pplink[mplink]
-        driver.get(pp_url)
-        party = driver.find_element(By.CLASS_NAME, 'card-header.text-center').find_element(By.TAG_NAME, 'h4').text.replace('\n','').split(' - ')[0].strip()
-        constituency = driver.find_element(By.CLASS_NAME, 'card-header.text-center').find_element(By.TAG_NAME, 'h4').text.replace('\n','').split(' - ')[1].strip()
-        region, country = dict_constituencies[constituency]
-
-        print('pp links: ',party,constituency,region,country)
-
-        # SCRAPE THEIPSA.ORG.UK/MP-STAFFING-BUSINESS-COSTS/YOUR-MP/
-        ipsa_url = dict_mplink_ipsalink[mplink]
-        driver.get(ipsa_url)
-
-        assumed_office = parse(driver.find_element(By.CLASS_NAME,'govuk-body-l').text, fuzzy=True).date()
-        years_in_office = datetime.datetime.now().year - assumed_office.year
-
-        buttons = driver.find_elements(By.CLASS_NAME,'govuk-accordion__section-button')
-        for button in buttons:
-            if button.text == '2020 to 2021':
-                button.click()
-
-        buttons = driver.find_elements(By.TAG_NAME, 'button')
-        for button in buttons:
-            if button.text == 'MP Payroll information':
-                button.click()
-
-        tables = driver.find_elements(By.TAG_NAME,'table')
-        for table in tables:
-            if 'Basic salary received during 2020 - 2021' in table.text:
-                payroll_table = table
-        for row in payroll_table.find_elements(By.TAG_NAME,'tr'):
-            if 'Basic salary received during 2020 - 2021' in row.text:
-                basic_salary = row.text.replace('Basic salary received during 2020 - 2021','').strip()
-            elif 'Amount paid to MP as LALP during 2020 to 2021' in row.text:
-                lalp_payment = row.text.replace('Amount paid to MP as LALP during 2020 to 2021','').strip()
-        
-        # SCRAPE WIKIPEDIA
-        wiki_url = dict_mplink_wikilink[mplink]
-        driver.get(wiki_url)
-
-        for row in driver.find_elements(By.TAG_NAME,'tr'):
-            if 'Majority' in row.text:
-                majority = row.text.replace('Majority','').strip().split(' ')[1].replace('(','').replace('%)','')
-        
-        print('wiki: ',majority)
-
-        # Close driver
-        driver.close()
-
-        #3 ADD TO DICTIONARY
-        dict_indv_mp = {
-            'party': party,
-            'constituency': constituency,
-            'region': region,
-            'country': country,
-            'assumed_office': assumed_office,
-            'years_in_office': years_in_office,
-            'majority': majority,
-            'basic_salary': float(basic_salary.replace('£','').replace(',','').strip()),
-            'lalp_payment': float(lalp_payment.replace('£','').replace(',','').strip())
-        }
-
-        print('dict_indv_mp: ',dict_indv_mp)
-
-        return dict_indv_mp
-
-    if indv_mplink == None:
-        dict_mpinfo_political = {} # {'name from link_name_dict': {...}}
-        failed_urls = []
-        for mplink in tqdm(list(dict_mplink_name.keys())):
-            try:
-                dict_mpinfo_political[dict_mplink_name[mplink]] = indv_mp(mplink)
-            except Exception as e:
-                failed_urls.append((mplink,e))
-        
-        dict_mpinfo_political_file = open('./pkl/dict_mpinfo_political.pkl', 'wb')
-        pickle.dump(dict_mpinfo_political, dict_mpinfo_political_file)
-        dict_mpinfo_political_file.close()
-
-    else:
-        dict_mpinfo_political = pickle.load(open('./pkl/dict_mpinfo_political.pkl','rb'))
-        failed_urls = []
-        try:
-            dict_mpinfo_political[dict_mplink_name[indv_mplink]] = indv_mp(indv_mplink)
-        except Exception as e:
-            failed_urls.append((indv_mplink,e))
-
-        dict_mpinfo_political_file = open('./pkl/dict_mpinfo_political.pkl', 'wb')
-        pickle.dump(dict_mpinfo_political, dict_mpinfo_political_file)
-        dict_mpinfo_political_file.close()  
-
-    return dict_mpinfo_political, failed_urls
-
-def scrape_parluk_for_mpfi(date, parluk_url): ## {'1. Employment and earnings': [('i', 'line'), ('i2', 'line), ...], '2. xyz': [(),()], ...}
-    os.environ['PATH'] = r"C:/selenium_drivers/edgedriver_win64_99"
-
-    driver = webdriver.Edge()
-    driver.get('https://publications.parliament.uk/pa/cm/cmregmem/'+date+'/'+parluk_url)
-    content = driver.page_source
-    soup = BeautifulSoup(content, 'html.parser')
-
-    dict_mpfi = {}
-    all_text = soup.find('div', id='mainTextBlock').find_all('p')[1:]
-    if all_text[0].text == 'Nil':
-        dict_mpfi = None
-    else:
-        for p in all_text:
-            if p.text in headings_dict.values():
-                h = p.text
-                h_list = []
-            else:
-                try:
-                    if p['class'][0] == 'indent':
-                        h_list.append(('i', p.text))
-                    elif p['class'][0] == 'indent2':
-                        h_list.append(('i2', p.text))
-                    elif p['class'][0] == 'indent3':
-                        h_list.append(('i3', p.text))
                 except:
                     pass
-            dict_mpfi[h] = h_list
-    
-    mp_file_name = parluk_url.replace('.htm','')
+            
+            dict_ipsaurls = {}
+            for link in ipsaurls:
+                ipsa_name = ''.join([i for i in link.replace('https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/','').replace('/','') if not i.isdigit()])
+                dict_ipsaurls[urllib.parse.unquote(ipsa_name.split('-')[1]+'_'+ipsa_name.split('-')[0])] = urllib.parse.unquote(link)
+            time.sleep(1)
 
-    if os.path.exists('./pkl/mpfi/'+date):
-        pass
-    else: 
-        os.makedirs('./pkl/mpfi/'+date)
-    
-    dict_mpfi_file = open('./pkl/mpfi/'+date+'/'+mp_file_name+'.pkl', 'wb')
-    pickle.dump(dict_mpfi, dict_mpfi_file)
-    dict_mpfi_file.close()
+            driver.close()
 
-def scrape_for_all_mpfi(date):
-    dict_parlurl_mpname = pickle.load(open('./pkl/dict_mplink_name.pkl','rb'))
+            ## manual entries
+            dict_ipsaurls['ahmad-khan_imran'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/imran-ahmad-khan/4841'
+            dict_ipsaurls['allin-khan_rosena'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/rosena-allin-khan/4573'
+            dict_ipsaurls['begley_órfhlaith'] = urllib.parse.unquote('https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/%C3%B3rfhlaith-begley/4697')
+            dict_ipsaurls['clarke-smith_brendan'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/brendan-clarke-smith/4756'
+            dict_ipsaurls['clifton-brown_geoffrey'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/geoffrey-clifton-brown/249'
+            dict_ipsaurls['coffey_therese'] = urllib.parse.unquote('https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/th%C3%A9r%C3%A8se-coffey/4098')
+            dict_ipsaurls['davies-jones_alex'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/alex-davies-jones/4849'
+            dict_ipsaurls['davies_david-t-c'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/david-t-c-davies/1545'
+            dict_ipsaurls['de-cordova_marsha'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/marsha-de-cordova/4676'
+            dict_ipsaurls['dhesi_tanmanjeet-singh'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/tanmanjeet-singh-dhesi/4638'
+            dict_ipsaurls['docherty-hughes_martin'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/martin-docherty-hughes/4374'
+            dict_ipsaurls['donaldson_jeffrey-m'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/jeffrey-m-donaldson/650'
+            dict_ipsaurls['doyle-price_jackie'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/jackie-doyle-price/4065'
+            dict_ipsaurls['duncan-smith_iain'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/iain-duncan-smith/152'
+            dict_ipsaurls['foy_mary-kelly'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/mary-kelly-foy/4753'
+            dict_ipsaurls['gill_preet-kaur'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/preet-kaur-gill/4603'
+            dict_ipsaurls['hart_sally-ann'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/sally-ann-hart/4842'
+            dict_ipsaurls['heaton-harris_chris'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/chris-heaton-harris/3977'
+            dict_ipsaurls['lewell-buck_emma'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/emma-lewell-buck/4277'
+            dict_ipsaurls['liddell-grainger_ian'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/ian-liddell-grainger/1396'
+            dict_ipsaurls['long-bailey_rebecca'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/rebecca-long-bailey/4396'
+            dict_ipsaurls['macneil_angus-brendan'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/angus-brendan-macneil/1546'
+            dict_ipsaurls['mcdonald_stewart-malcolm'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/stewart-malcolm-mcdonald/4461'
+            dict_ipsaurls['mcdonald_stuart-c'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/stuart-c-mcdonald/4393'
+            dict_ipsaurls['morris_anne-marie'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/anne-marie-morris/4249'
+            dict_ipsaurls['mumby-croft_holly'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/holly-mumby-croft/4867'
+            dict_ipsaurls['obrien_neil'] = "https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/neil-o'brien/4679"
+            dict_ipsaurls['ohara_brendan'] = "https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/brendan-o'hara/4371"
+            dict_ipsaurls['oppong-asare_abena'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/abena-oppong-asare/4820'
+            dict_ipsaurls['rees-mogg_jacob'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/jacob-rees-mogg/4099'
+            dict_ipsaurls['ribeiro-addy_bell'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/bell-ribeiro-addy/4764'
+            dict_ipsaurls['russell-moyle_lloyd'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/lloyd-russell-moyle/4615'
+            dict_ipsaurls['vara_shailesh'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/shailesh-vara/1496'
+            dict_ipsaurls['saville-roberts_liz'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/liz-saville-roberts/4521'
+            dict_ipsaurls['thomas-symonds_nick'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/nick-thomas-symonds/4479'
+            dict_ipsaurls['trevelyan_anne-marie'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/anne-marie-trevelyan/4531'
+            dict_ipsaurls['zahawi_nadhim'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/nadhim-zahawi/4113'
+            dict_ipsaurls['zeichner_daniel'] = 'https://www.theipsa.org.uk/mp-staffing-business-costs/your-mp/daniel-zeichner/4382'
 
-    for url in tqdm(dict_parlurl_mpname.keys()):
-        pklpath = './pkl/mpfi/'+date+'/'+url.replace('.htm','')+'.pkl'
-        if os.path.exists(pklpath): ## check if url has already been scraped
-            pass
-        else:
-            print(url)
+            return dict_ipsaurls
+
+        def db(dict1,dict2) -> dict: # -> {'mpurl':'dburl', ...}
+            dict_parlukurl_name = dict1
+            dict_wikiurls = dict2
+
+            dict_dburls = {}
+            for mpurl in tqdm(dict_parlukurl_name.keys(), desc="DBpedia.org"):
+                dict_dburls[mpurl] = urllib.parse.unquote(dict_wikiurls[mpurl].replace('https://en.wikipedia.org/wiki/','https://dbpedia.org/page/'))
+
+            return dict_dburls
+
+        dict_url_nameparlukurl = parluk('220228')
+        dict_ppurl = pp(dict_url_nameparlukurl)
+        dict_wikiurl = wiki(dict_url_nameparlukurl)
+        dict_dburl = db(dict_url_nameparlukurl,dict_wikiurl)
+        dict_ipsaurl = ipsa()
+
+        failed_urls = []
+        dict_name_urls = {}
+        for mpurl, name_parlukurl in tqdm(list(dict_url_nameparlukurl.items()),desc="Compiling dict..."):
             try:
-                scrape_parluk_for_mpfi(date, url)
-            except:
-                pass
-            time.sleep(15) ## wait 15 seconds to avoid getting blocked
+                name = name_parlukurl[0]
+                parlukurl = urllib.parse.unquote(name_parlukurl[1])
 
-#scrape_for_all_mpfi(date)
-dict_mpinfo_poltical, failed_urls = scrape_mpinfo_political()
+                dict_name_urls[mpurl] = {
+                    'name':name,
+                    'parlukurl':parlukurl,
+                    'ppurl':dict_ppurl[mpurl],
+                    'wikiurl':dict_wikiurl[mpurl],
+                    'ipsaurl':dict_ipsaurl[mpurl],
+                    'dburl':dict_dburl[mpurl]
+                }
+                #print(mpurl,' SUCCESS')
+            except Exception as e:
+                failed_urls.append((mpurl,e))
+                #print(mpurl,' FAILED')
 
-##############
-## 2. PARSE ##
-##############
+        # save to pkl
+        dict_name_urls_file = open('./pkl/dict_name_urls.pkl', 'wb')
+        pickle.dump(dict_name_urls, dict_name_urls_file)
+        dict_name_urls_file.close()
 
-# Main parsers
-def parse_mpfi_pkl(date, parluk_url, heading_ref): # returns list of dicts (dict for each line) for a single MP
+        return failed_urls
 
-    #################################
-    ## PARSE_MPFIPKL SUB-FUNCTIONS ##
-    #################################
+    def mpfi(mpurl: str = None) -> None:
+            os.environ['PATH'] = Config.selenium_path
+            dict_name_urls = pickle.load(open('./pkl/dict_name_urls.pkl','rb'))
 
-    def date_processor(dict_line): ## dict_line => start_date_ytd and end_date_ytd
+            def get_indv_dict(parlukurl: str) -> dict:
+                # option to add headers back in if I start getting blocked (False by default)
+                driver = webdriver.Edge(options=Config.selenium_options) ## yes it's slow to open/close every time but otherwise you get CAPTCHA'd
+                
+                driver.get(parlukurl)
 
-        # filter out any date lists with more than 1 element
-        if len(dict_line['date']) > 1:
-            print('len dict_date: > 1')    
-            dict_date = max(dict_line['date'], key=len).lower()     # takes longest item in dict_date as new dict_date                    
-        else:
-            print('len dict_date: <= 1')
-            dict_date = dict_line['date'][0].lower()
+                content = driver.page_source
+                soup = BeautifulSoup(content, 'html.parser')
 
-        print('dict_date: ',dict_date)
-        
-        # figure out structure of date (e.g. single date or 'from until', 'until', 'from', 'to') and find start_date_ytd/end_date_ytd
-        if 'from' in dict_date or 'until' in dict_date or ' to ' in dict_date or 'onwards' in dict_date or 'between' in dict_date:
-            print('single date: false')        
-            
-            keyword_list = []
-            for keyword in ['from', 'until', ' to ', 'onwards', 'between', ' and ', 'since']:
-                if keyword in dict_date:
-                    keyword_list.append(keyword)
+                dict_indv_mpfi = {}
+                all_text = soup.find('div', id='mainTextBlock').find_all('p')[1:]
+
+                if all_text[0].text == 'Nil':
+                    dict_indv_mpfi = None
                 else:
-                    pass
-            
-            print('keyword_list: ',keyword_list)
-            
-            # create start_date and end_date
-            if len(keyword_list) == 1:
-                if 'from' in keyword_list:
-                    print('1 / from: true')
-                    start_date = [i for i in datefinder.find_dates(dict_date.replace('from',''))][0]
-                    end_date = mpfi_date
-                if 'since' in keyword_list:
-                    print('1 / from: true')
-                    start_date = [i for i in datefinder.find_dates(dict_date.replace('since',''))][0]
-                    end_date = mpfi_date                
-                elif 'onwards' in keyword_list:
-                    print('1 / onwards: true')
-                    start_date = [i for i in datefinder.find_dates(dict_date.replace('onwards',''))][0]
-                    end_date = mpfi_date            
-                elif 'until' in keyword_list:
-                    print('1 / until: true')
-                    split_dates = [i for i in re.split('until', dict_date) if i != '']
-                    if len(split_dates) == 1:
-                        if 'further notice' in dict_date:
-                            print('1 / further notice: true')
-                            start_date = mpfi_date_minus_one_year
-                            end_date = mpfi_date
+                    for p in all_text:
+                        if p.text in Config.categories_dict.values():
+                            h = p.text
+                            h_list = []
                         else:
-                            if [i for i in datefinder.find_dates(split_dates[0])][0] < mpfi_date_minus_one_year:
-                                start_date = [i for i in datefinder.find_dates(split_dates[0])][0]
-                                end_date = [i for i in datefinder.find_dates(split_dates[0])][0]
-                            else:
-                                start_date = mpfi_date_minus_one_year
-                                end_date = [i for i in datefinder.find_dates(split_dates[0])][0]
-                    if len(split_dates) == 2:
-                        start_date = [i for i in datefinder.find_dates(split_dates[0])][0]
-                        if 'further notice' in dict_date:
-                            print('1 / further notice: true')
-                            end_date = mpfi_date
-                        else:
-                            end_date = [i for i in datefinder.find_dates(split_dates[1])][0]
-                elif ' to ' in keyword_list:
-                    print('1 / to: true')
-                    split_dates = re.split('to', dict_date)
-                    start_date = [i for i in datefinder.find_dates(split_dates[0])][0]
-                    end_date = [i for i in datefinder.find_dates(split_dates[1])][0]
-                elif 'between' in keyword_list:
-                    print('1 / between: true')
-                    start_date = [i for i in datefinder.find_dates(dict_date)][0]
-                    end_date = [i for i in datefinder.find_dates(dict_date)][0]
-            elif len(keyword_list) == 2:
-                if 'from' and 'until' in keyword_list:
-                    print('2 / from and until: true')
-                    split_dates = re.split('until', dict_date)
-                    start_date = [i for i in datefinder.find_dates(split_dates[0].replace('from',''))][0]
-                    if 'further notice' in split_dates[1]:
-                        print('2 / further notice: true')
-                        end_date = mpfi_date
-                    else:
-                        end_date = [i for i in datefinder.find_dates(split_dates[1])][0]
-                elif 'from' and ' to ' in keyword_list:
-                    print('2 / from and to: true')
-                    split_dates = re.split(' to ', dict_date)
-                    start_date = [i for i in datefinder.find_dates(split_dates[0].replace('from',''))][0]
-                    end_date = [i for i in datefinder.find_dates(split_dates[1])][0]
-                elif 'from' and 'onwards' in keyword_list:
-                    print('2 / from and onwards: true')
-                    start_date = [i for i in datefinder.find_dates(dict_date.replace('from','').replace('onwards',''))][0]
-                    end_date = mpfi_date
-                elif 'between' and ' and ' in keyword_list:
-                    print('2 / between and and: true')
-                    split_dates = re.split(' and ', dict_date)
+                            try:
+                                if p['class'][0] == 'indent':
+                                    h_list.append(('i', p.text))
+                                elif p['class'][0] == 'indent2':
+                                    h_list.append(('i2', p.text))
+                            except:
+                                pass
+                        dict_indv_mpfi[h] = h_list
+                
+                driver.close()
+
+                return dict_indv_mpfi
+            
+            failed_urls = []
+            if mpurl is None:
+                dict_mpfi = {}
+                for mpurl, name_urls in tqdm(dict_name_urls.items(), desc="MPFI"):
+                    parlukurl = name_urls['parlukurl']
                     try:
-                        start_date = [i for i in datefinder.find_dates(split_dates[0].replace('between',''))][0]
-                        end_date = [i for i in datefinder.find_dates(split_dates[1])][0]        
-                    except:
-                        end_date = [i for i in datefinder.find_dates(split_dates[1])][0]   
-                        start_date = end_date                 
+                        dict_indv_mpfi = get_indv_dict(parlukurl)
+                        dict_mpfi[mpurl] = dict_indv_mpfi
+                        #print(mpurl,' SUCCESS')
+                    except Exception as e:
+                        failed_urls.append((mpurl,e))
+                        #print(mpurl,' FAIL')
             else:
-                print('0 / other: true')
-                start_date_ytd = None
-                end_date_ytd = None
-                return start_date_ytd, end_date_ytd
+                dict_mpfi = pickle.load(open('./pkl/dict_mpfi.pkl','rb'))
+                parlukurl = dict_name_urls[mpurl]['parlukurl']
+                dict_indv_mpfi = get_indv_dict(parlukurl)
+                dict_mpfi[mpurl] = dict_indv_mpfi
 
-            # calculate start_date_ytd and end_date_ytd
-            print('start_date / end_date:',start_date,end_date)
-            if start_date <= mpfi_date_minus_one_year and end_date <= mpfi_date_minus_one_year:
-                print('1')
-                start_date_ytd = mpfi_date_minus_one_year
-                end_date_ytd = mpfi_date_minus_one_year
-            elif start_date <= mpfi_date_minus_one_year and end_date >= mpfi_date_minus_one_year and end_date <= mpfi_date:
-                print('2')
-                start_date_ytd = mpfi_date_minus_one_year
-                end_date_ytd = end_date
-            elif start_date <= mpfi_date_minus_one_year and end_date > mpfi_date:
-                print('3')
-                start_date_ytd = mpfi_date_minus_one_year
-                end_date_ytd = mpfi_date
-            elif start_date >= mpfi_date_minus_one_year and start_date <= mpfi_date and end_date >= mpfi_date_minus_one_year and end_date <= mpfi_date:
-                print('4')
-                start_date_ytd = start_date
-                end_date_ytd = end_date              
-            elif start_date >= mpfi_date_minus_one_year and start_date <= mpfi_date and end_date > mpfi_date:
-                print('5')
-                start_date_ytd = start_date
-                end_date_ytd = mpfi_date
-            elif start_date > mpfi_date and end_date > mpfi_date:
-                print('6')
-                start_date_ytd = mpfi_date
-                end_date_ytd = mpfi_date
+            dict_mpfi_file = open('./pkl/dict_mpfi.pkl', 'wb')
+            pickle.dump(dict_mpfi, dict_mpfi_file)
+            dict_mpfi_file.close()
 
-            print('start_date_ytd / end_date_ytd:',start_date_ytd,end_date_ytd)
-            return start_date_ytd, end_date_ytd
-        else:
-            print('single date: true')
-            start_date = [i for i in datefinder.find_dates(dict_date)][0]
-            end_date = [i for i in datefinder.find_dates(dict_date)][0]
-            print('start_date / end_date:',start_date,end_date)
+            return failed_urls
 
-            # calculate start_date_ytd and end_date_ytd
-            if start_date < mpfi_date_minus_one_year:
-                start_date_ytd = None
+    def other_info(mpurl: str = None) -> None:
+            dict_name_urls = pickle.load(open('./pkl/dict_name_urls.pkl','rb'))
+            dict_constituencies = pickle.load(open('./pkl/dict_constituencies.pkl','rb'))
+
+            def get_indv_dict(mpurl):
+                # DICTIONARY
+                dict_indv_mp = {
+                    'name': dict_name_urls[mpurl]['name'],
+                    'party': '',
+                    'constituency': '',
+                    'region': '',
+                    'country': '',
+                    'assumed_office': '',
+                    'years_in_office': '',
+                    'majority': '',
+                    'basic_salary': '',
+                    'lalp_payment': '',
+                }
+
+                os.environ['PATH'] = Config.selenium_path
+                driver = webdriver.Edge(options=Config.selenium_options)
+
+                # SCRAPE PARALLELPARLIAMENT.CO.UK FOR PARTY
+                ppurl = dict_name_urls[mpurl]['ppurl']
+                driver.get(ppurl)
+
+                try:
+                    dict_indv_mp['party'] = driver.find_element(By.CLASS_NAME, 'card-header.text-center').find_element(By.TAG_NAME, 'h4').text.replace('\n','').split(' - ')[0].strip()
+                except Exception as e:
+                    #print('ppurl party failed:',e)
+                    pass
+                
+                try:
+                    dict_indv_mp['constituency'] = driver.find_element(By.CLASS_NAME, 'card-header.text-center').find_element(By.TAG_NAME, 'h4').text.replace('\n','').split(' - ')[1].strip()
+                    dict_indv_mp['region'], dict_indv_mp['country'] = dict_constituencies[dict_indv_mp['constituency']]
+                except Exception as e:
+                    dict_indv_mp['constituency'] = driver.find_element(By.CLASS_NAME, 'card-header.text-center').find_element(By.TAG_NAME, 'h4').text
+                    #print('ppurl constituency failed:',e)
+
+                # SCRAPE THEIPSA.ORG.UK/MP-STAFFING-BUSINESS-COSTS/YOUR-MP/ FOR ASSUMED_OFFICE, YEARS_IN_OFFICE, BASIC_SALARY, LALP_PAYMENT
+                ipsaurl = dict_name_urls[mpurl]['ipsaurl']
+                driver.get(ipsaurl)
+
+                try:
+                    dict_indv_mp['assumed_office'] = parse(driver.find_element(By.CLASS_NAME,'govuk-body-l').text, fuzzy=True).date()
+                    dict_indv_mp['years_in_office'] = datetime.datetime.now().year - dict_indv_mp['assumed_office'].year
+                except Exception as e:
+                    #print('ipsaurl assumed_office failed:',e)
+                    pass
+                
+                try:
+                    buttons = driver.find_elements(By.CLASS_NAME,'govuk-accordion__section-button')
+                    for button in buttons:
+                        if button.text == '2020 to 2021':
+                            button.click()
+                    time.sleep(2)
+
+                    buttons = driver.find_elements(By.TAG_NAME, 'button')
+                    for button in buttons:
+                        if button.text == 'MP Payroll information':
+                            button.click()
+                    time.sleep(2)
+
+                    tables = driver.find_elements(By.TAG_NAME,'table')
+                    for table in tables:
+                        if 'Basic salary received during 2020 - 2021' in table.text:
+                            payroll_table = table
+                    for row in payroll_table.find_elements(By.TAG_NAME,'tr'):
+                        if 'Basic salary received during 2020 - 2021' in row.text:
+                            basic_salary = row.text.replace('Basic salary received during 2020 - 2021','').strip()
+                            dict_indv_mp['basic_salary'] = float(basic_salary.replace('£','').replace(',','').strip())
+                        elif 'Amount paid to MP as LALP during 2020 to 2021' in row.text:
+                            lalp_payment = row.text.replace('Amount paid to MP as LALP during 2020 to 2021','').strip()
+                            dict_indv_mp['lalp_payment'] = float(lalp_payment.replace('£','').replace(',','').strip())
+                except Exception as e:
+                    dict_indv_mp['basic_salary'] = 'Not available'
+                    dict_indv_mp['lalp_payment'] = 'Not available'
+                    #print('ipsaurl basic salary or lalp_payment failed',e)
+
+                # SCRAPE WIKIPEDIA FOR MAJORITY
+                try:
+                    wikiurl = dict_name_urls[mpurl]['wikiurl']
+                    driver.get(wikiurl)
+
+                    for row in driver.find_elements(By.TAG_NAME,'tr'):
+                        if 'Majority' in row.text:
+                            dict_indv_mp['majority'] = row.text.replace('Majority','').strip().split(' ')[1].replace('(','').replace('%)','')
+                except Exception as e:
+                    #print('wikiurl failed',e)
+                    pass
+
+                # Close driver
+                driver.close()
+
+                #print('dict_indv_mp: ',dict_indv_mp)
+
+                return dict_indv_mp
+
+            if mpurl == None:
+                # if there is already a dict_other_info file then load that / else create a blank one
+                if os.path.isfile('./pkl/dict_other_info.pkl'):
+                    dict_other_info = pickle.load(open('./pkl/dict_other_info.pkl','rb'))
+                    start_index = len(dict_other_info)-1 # repeats the last scraped mp in case the scrape was terminated part-way through
+                else:
+                    dict_other_info = {}
+                    start_index = 0
+                
+                failed_urls = []
+                for mpurl, name_urls in tqdm(list(dict_name_urls.items())[start_index:]):
+                    try:
+                        dict_other_info = pickle.load(open('./pkl/dict_other_info.pkl','rb'))
+                        dict_other_info[mpurl] = get_indv_dict(mpurl) # not very efficient to open/close but this allows for doing this scrape in bursts as it takes a long time (~3-4 hours)
+                        
+                        dict_other_info_file = open('./pkl/dict_other_info.pkl', 'wb')
+                        pickle.dump(dict_other_info, dict_other_info_file)
+                        dict_other_info_file.close()
+                    except Exception as e:
+                        #print('*** FAILED ***',mpurl,e)
+                        failed_urls.append((mpurl,e))
+                
+                # MANUAL ADD-INS
+                dict_other_info['mortimer_jill']['party'] = 'Conservative'
+                dict_other_info['mortimer_jill']['constituency'] = 'Hartlepool'
+                dict_other_info['mortimer_jill']['region'], dict_other_info['mortimer_jill']['country'] = dict_constituencies[dict_other_info['mortimer_jill']['constituency']]
+                
+                dict_other_info['wilson_sammy']['party'] = 'Democratic Unionist Party'
+                dict_other_info['wilson_sammy']['constituency'] = 'East Antrim'
+                dict_other_info['wilson_sammy']['region'], dict_other_info['wilson_sammy']['country'] = dict_constituencies[dict_other_info['wilson_sammy']['constituency']]
+
+                dict_other_info['leadbeater_kim']['party'] = 'Labour'
+                dict_other_info['leadbeater_kim']['constituency'] = 'Batley and Spen'
+                dict_other_info['leadbeater_kim']['region'], dict_other_info['leadbeater_kim']['country'] = dict_constituencies[dict_other_info['leadbeater_kim']['constituency']]
+
+                dict_other_info['green_sarah']['party'] = 'Liberal Democrat'
+                dict_other_info['green_sarah']['constituency'] = 'Chesham and Amersham'
+                dict_other_info['green_sarah']['region'], dict_other_info['green_sarah']['country'] = dict_constituencies[dict_other_info['green_sarah']['constituency']]
+
+                # SAVE TO PKL
+                dict_other_info_file = open('./pkl/dict_other_info.pkl', 'wb')
+                pickle.dump(dict_other_info, dict_other_info_file)
+                dict_other_info_file.close()
+
+                #print('\n\n*** FAILED URLS ***\n\n',failed_urls,'\n\n *** \n\n')
+
             else:
-                start_date_ytd = start_date
+                dict_other_info = pickle.load(open('./pkl/dict_other_info.pkl','rb'))
+                try:
+                    dict_other_info[mpurl] = get_indv_dict(mpurl)
+                except Exception as e:
+                    #print('get_indv_mp failed:',e)
+                    pass
+
+                dict_other_info_file = open('./pkl/dict_other_info.pkl', 'wb')
+                pickle.dump(dict_other_info, dict_other_info_file)
+                dict_other_info_file.close()
+
+class Extract:
+    """
+    The Extract class contains the functions required to turn dict_mpfi into the final data needed
+    for the spreadsheet. It uses custom-trained named entity recognition models (spaCy) to extract entities.
+
+    mpfi() -> None
+        -> This function turns the lines stored in dict_mpfi into a long list of dicts where each dict represents a line. 
+        -> The dict contains all of the final data required for the spreadsheet and is structured like this: 
+            [
+                {
+                    'name': 'Abbott, Ms Diane', 
+                    'full_text': 'Payments from the Guardian, Kings Place, 90 York Way, London N1 9GU, for articles:', 
+                    'parlukurl': 'https://publications.parliament.uk/pa/cm/cmregmem/220419/abbott_diane.htm', 
+                    'date': '', 'orgs': 'the Guardian', 
+                    'money': '', 'time': '', 
+                    'role': 'for articles', 
+                    'total_money_ytd': None, 
+                    'total_time_ytd': None
+                },
+                {
+                    ...
+                },
+                ...
+            ]
+    
+    """
+
+    def date_processor(dict_line: str) -> datetime: #dict_line['date'] -> start_date_ytd, end_date_ytd
+
+        def ytd(date: datetime) -> datetime: # date -> date_ytd
+            if date <= mpfi_date_minus_one_year:
+                date_ytd = mpfi_date_minus_one_year
+            elif date >= mpfi_date_minus_one_year and date <= mpfi_date:
+                date_ytd = date
+            elif date >= mpfi_date:
+                date_ytd = mpfi_date
             
-            if end_date > mpfi_date:
-                end_date_ytd = None
+            return date_ytd
+
+        date_raw = dict_line['date']
+
+        # filter out any date lists with more than 1 element / choose longest date / make lowercase for processing
+        if len(date_raw) > 1: date_raw = max(date_raw, key=len).lower()     # takes longest item in dict_date as new dict_date                    
+        else: date_raw = date_raw[0].lower()
+
+        date_raw = date_raw.replace('further notice',date_words).replace('election to parliament',election_date_words)
+
+        # datefinder is very buggy - it works best if I take out keywords such as from and until and replace them with hashes
+        date_keywords = ['from','since','onwards','until','between',' and ',' to ']
+
+        datefinder_raw = date_raw
+        for keyword in date_keywords:
+            if keyword in datefinder_raw:
+                datefinder_raw = datefinder_raw.replace(keyword,'#')
+
+        dates = [i for i in datefinder.find_dates(datefinder_raw)]
+        # get start_date and end_date
+        if len(dates) == 2:
+            start_date = ytd(dates[0])
+            end_date = ytd(dates[1])
+
+        elif len(dates) == 1:
+            if any([i for i in ['from','since','onwards'] if i in date_raw]):
+                start_date = ytd(dates[0])
+                end_date = mpfi_date
+            elif 'until' in date_raw:
+                end_date = ytd(dates[0])
+                start_date = ytd(end_date+datetime.timedelta(-365))
             else:
-                end_date_ytd = end_date
+                start_date = ytd(dates[0])
+                end_date = ytd(dates[0])
 
-            print('start_date_ytd / end_date_ytd:',start_date_ytd,end_date_ytd)
-            return start_date_ytd, end_date_ytd
+        return start_date, end_date
 
-    def total_money_ytd(dict_line): ## dict_line => total_money_ytd
+    def total_money_ytd(dict_line: str) -> int: ## dict_line => total_money_ytd
         # if date or money is missing, return none
         if len(dict_line['date']) == 0:
             total_money_ytd = None
@@ -592,22 +685,17 @@ def parse_mpfi_pkl(date, parluk_url, heading_ref): # returns list of dicts (dict
                 'NA': 1
             }
             if len(dict_line['money']) > 1:
-                print("len dict_line['money']: > 1")
                 total_money_ytd = 'MANUAL_CHECK'
             else:
-                print("len dict_line['money']: <= 1")
                 try:
                     money_raw_value = float(''.join([i for i in dict_line['money'][0] if i.isdigit() is True or i == '.']))
                 except:
                     total_money_ytd = 'MANUAL_CHECK'
                     return total_money_ytd
-                print('money_raw_value:',money_raw_value)
                 money_period = nlp_money(dict_line['money'][0]).ents[0].label_
-                print('money_period:',money_period)
 
                 # for dict_line['total_money_ytd']: calculate total_money_ytd
                 if money_period == '1':                                         # for non-recurring sums, check if the sum is in date
-                    print('money_period: 1')
                     try:
                         date_parsed = dateutil.parser.parse(dict_line['date'][0])
                         if date_parsed < mpfi_date_minus_one_year:
@@ -615,32 +703,24 @@ def parse_mpfi_pkl(date, parluk_url, heading_ref): # returns list of dicts (dict
                         else:
                             total_money_ytd = money_raw_value
                     except:
-                        print('money_period: not 1')
-                        start_date_ytd, end_date_ytd = date_processor(dict_line)
+                        start_date_ytd, end_date_ytd = Extract.date_processor(dict_line)
                         total_money_for_one_year = money_raw_value*period_dict[money_period]
-                        print('start_date_ytd, end_date_ytd: ',start_date_ytd, end_date_ytd)
                         try:
                             percentage_of_year_elapsed = (end_date_ytd-start_date_ytd).days/365
                             if percentage_of_year_elapsed == 0.0:                    # for a single date, start_date_ytd = end_date_ytd and percentage_.. = 0
-                                print('percentage_of_year_elapsed: 0')
                                 total_money_ytd = float(0)
                             else:
-                                print('percentage_of_year_elapsed: not 0')
                                 total_money_ytd = round(total_money_for_one_year*percentage_of_year_elapsed)
                         except:                                                       # if date_processor returns None's
                             total_money_ytd = 'MANUAL_CHECK'
                 else:                                                                 # for recurring sums (i.e. D, W, 2W, M, Q, Y)
-                    print('money_period: not 1')
-                    start_date_ytd, end_date_ytd = date_processor(dict_line)
+                    start_date_ytd, end_date_ytd = Extract.date_processor(dict_line)
                     total_money_for_one_year = money_raw_value*period_dict[money_period]
                     try:
                         percentage_of_year_elapsed = (end_date_ytd-start_date_ytd).days/365
-                        print('percentage_of_year_elapsed:',percentage_of_year_elapsed)
                         if percentage_of_year_elapsed == 0.0:                         # for a single date, start_date_ytd = end_date_ytd and percentage_.. = 0
-                            print('percentage_of_year_elapsed == 0')
                             total_money_ytd = float(0)
                         else:
-                            print('percentage_of_year_elapsed != 0')
                             total_money_ytd = round(total_money_for_one_year*percentage_of_year_elapsed)
                     except:                                                          # if date_processor returns None's
                         total_money_ytd = None
@@ -655,36 +735,38 @@ def parse_mpfi_pkl(date, parluk_url, heading_ref): # returns list of dicts (dict
 
         return total_money_ytd                    
     
-    def total_time_ytd(dict_line): ## dict_line => total_money_ytd
+    def total_time_ytd(dict_line: str) -> int: ## dict_line => total_money_ytd
 
         ##################################
         ## TOTAL_TIME_YTD SUB-FUNCTIONS ##
         ##################################
 
         def numwords(text):
-            try: 
-                float(re.findall(r'-?\d+\.?\d*', text)[0])
-            except:
+            list_text = text.split(' ')
+            #print(list_text)
+            list_new_text = []
+            for item in list_text:
                 try:
-                    word_num = num2words(w2n.word_to_num(text))
-                    print(word_num)
-                    text = text.replace(word_num,str(w2n.word_to_num(word_num)))      # turning 'two days ...' into '2 days...'
-                    print(text)
+                    list_new_text.append(w2n.word_to_num(item))
                 except:
-                    pass
-            
-            if 'a year' in text:                                                    
-                text = text.replace('a year', 'per year')       # nlp_trf doesn't like 'a year' for some reason...
+                    list_new_text.append(item)
+            #print(list_new_text)
 
-            return text
+            new_text = ' '.join([str(item) for item in list_new_text])
+            
+            if 'a year' in new_text:                                                    
+                new_text = new_text.replace('a year', 'per year')       # nlp_trf doesn't like 'a year' for some reason...
+            #print(new_text)
+            return new_text
 
         def time_processor(text): # dict_line['time'] > time_raw_value
+            
             # replace any word-nums with nums
             text = numwords(text)
+            #print(text)
 
             # extract date and remove 'per month' etc
             doc_time = nlp_trf(text)
-            print('doc_time: ',doc_time)
             try:                                                                       
                 time = [i for i in doc_time.ents if i.label_ == 'TIME'][0].text
             except:
@@ -692,9 +774,7 @@ def parse_mpfi_pkl(date, parluk_url, heading_ref): # returns list of dicts (dict
                     time = [i for i in doc_time.ents if i.label_ == 'DATE'][0].text
                 except:                                     
                     time = 'MANUAL_CHECK'
-                    print('time (MANUAL_CHECK): ',time)
                     return time
-            print('time:',time)   
 
             # REMOVE MISLEADING WORDS
             time = time.replace('non-consecutive','')
@@ -708,7 +788,6 @@ def parse_mpfi_pkl(date, parluk_url, heading_ref): # returns list of dicts (dict
                 time_raw_value = time.replace('approx.','')[1].strip() #strip out 'approx' (and non-numerics) and use higher bound figure (e.g. 80-100 hours)
             else:
                 time_raw_value = time
-            print('time_raw_value:',time_raw_value)
             
             # PROCESS FOR MINS/HOURS
             m_keywords = ['mins','min']
@@ -722,22 +801,18 @@ def parse_mpfi_pkl(date, parluk_url, heading_ref): # returns list of dicts (dict
                 if item in time_raw_value: list_mhd.append('h')  
             for item in d_keywords:
                 if item in time_raw_value: list_mhd.append('d')  
-            print('list_mhd:',list_mhd)
 
             if 'm' in list_mhd and 'h' in list_mhd:
-                print('m and h: true')
                 list_time_values = [float(s) for s in re.findall(r'-?\d+\.?\d*', time_raw_value)]
                 hrs = list_time_values[0]
                 mins = list_time_values[1]
             elif 'h' in list_mhd and 'm' not in list_mhd:
-                print('h: true')
                 try:
                     hrs = float(re.findall(r'-?\d+\.?\d*', time_raw_value)[0])
                 except:                                                         # PROCESS FOR WORD-NUMBERS (E.G.'SIX HOURS')
                     pass
                 mins = float(0)
             elif 'm' in list_mhd and 'h' not in list_mhd:
-                print('m: true')
                 try: 
                     mins = float(re.findall(r'-?\d+\.?\d*', time_raw_value)[0])
                 except:                                                         # PROCESS FOR WORD-NUMBERS (E.G.'THIRTY MINUTES')
@@ -749,7 +824,6 @@ def parse_mpfi_pkl(date, parluk_url, heading_ref): # returns list of dicts (dict
                 mins = float(0)                                                 
 
             time_raw_value = round(hrs+(mins/60), 2)                             # TIME_RAW_VALUE IN HOURS
-            print(time_raw_value)
 
             return time_raw_value
 
@@ -775,360 +849,508 @@ def parse_mpfi_pkl(date, parluk_url, heading_ref): # returns list of dicts (dict
                 'NA': 1
             }
             if len(dict_line['time']) > 1:
-                print("len dict_line['time']: > 1")
                 total_time_ytd = 'MANUAL_CHECK'
             else:
-                print("len dict_line['time']: <= 1")
                 time_raw_value = time_processor(dict_line['time'][0])
-                print('time_raw_value:',time_raw_value)
                 if time_raw_value == 'MANUAL_CHECK':
                     total_time_ytd = 'MANUAL_CHECK'
                     return total_time_ytd
                 time_period = nlp_time(dict_line['time'][0]).ents[0].label_
-                print('time_period:',time_period)
 
                 # for dict_line['total_money_ytd']: calculate total_money_ytd
                 if time_period == '1':                                         # for non-recurring sums, check if the sum is in date
-                    print('time_period: 1')
                     try:
                         date_parsed = [i for i in datefinder.find_dates(dict_line['date'][0])][0]
-                        print('date_parsed:',date_parsed)
                         if date_parsed < mpfi_date_minus_one_year:
                             total_time_ytd = float(0)
                         else:
                             total_time_ytd = time_raw_value
                     except:
-                        print('time_period: not 1')
-                        start_date_ytd, end_date_ytd = date_processor(dict_line)
+                        start_date_ytd, end_date_ytd = Extract.date_processor(dict_line)
                         total_time_for_one_year = time_raw_value*period_dict[time_period]
-                        print('start_date_ytd, end_date_ytd: ',start_date_ytd, end_date_ytd)
                         try:
                             percentage_of_year_elapsed = (end_date_ytd-start_date_ytd).days/365
                             if percentage_of_year_elapsed == 0.0:                    # for a single date, start_date_ytd = end_date_ytd and percentage_.. = 0
-                                print('percentage_of_year_elapsed: 0')
                                 total_time_ytd = float(0)
                             else:
-                                print('percentage_of_year_elapsed: not 0')
                                 total_time_ytd = round(total_time_for_one_year*percentage_of_year_elapsed, 2)
                         except:                                                       # if date_processor returns None's
                             total_time_ytd = None
                 else:                                                                 # for recurring sums (i.e. D, W, 2W, M, Q, Y)
-                    print('money_period: not 1')
-                    start_date_ytd, end_date_ytd = date_processor(dict_line)
+                    start_date_ytd, end_date_ytd = Extract.date_processor(dict_line)
                     total_time_for_one_year = time_raw_value*period_dict[time_period]
                     try:
                         percentage_of_year_elapsed = (end_date_ytd-start_date_ytd).days/365
-                        print('percentage_of_year_elapsed:',percentage_of_year_elapsed)
                         if percentage_of_year_elapsed == 0.0:                         # for a single date, start_date_ytd = end_date_ytd and percentage_.. = 0
-                            print('percentage_of_year_elapsed == 0')
                             total_time_ytd = float(0)
                         else:
-                            print('percentage_of_year_elapsed != 0')
                             total_time_ytd = round(total_time_for_one_year*percentage_of_year_elapsed, 2)
                     except:                                                          # if date_processor returns None's
                         total_time_ytd = None
 
         return total_time_ytd  
 
-    #################################
-    ## PARSE_MPFIPKL MAIN FUNCTION ##
-    #################################
+    def parse_lines_mp(mpurl: str, category: str = 'c1') -> list: ## mpurl => parsed_lines_mp
+        dict_name_urls = pickle.load(open('./pkl/dict_name_urls.pkl','rb'))
+        dict_mpfi = pickle.load(open('./pkl/dict_mpfi.pkl','rb'))
+        
+        mpfi = dict_mpfi[mpurl]
+        cat = Config.categories_dict[category]
 
-    # turn parluk_url into pkl and save in variable
-    dict_parlukurl_name = pickle.load(open('./pkl/dict_mplink_name.pkl','rb'))
-    pklpath = './pkl/mpfi/'+date+'/'+parluk_url.replace('.htm','')+'.pkl'
-    dict_pkl = pickle.load(open(pklpath, 'rb'))
-    try:
-        lines = dict_pkl[heading_ref] ## list of tuples from pkl [('i', 'line'), ('i', 'line'), ...]
-    except:
-        list_mpdata = [{'name':dict_parlukurl_name[parluk_url],
-                        'full_text':'N/A',
-                        'date':'N/A',
-                        'orgs':'N/A',
-                        'money':float(0),
-                        'time':float(0),
-                        'role':'N/A',
-                        'total_money_ytd':float(0),
-                        'total_time_ytd':float(0)
-                        }]
-        return list_mpdata
-    
-    # set up variables needed for dict_line
-    nlp = spacy.load("./ner_models/all_ents/model-best")
-    nlp_money = spacy.load('./ner_models/money/model-best')
-    nlp_time = spacy.load('./ner_models/time/model-best')
-    nlp_trf = spacy.load('en_core_web_trf')
-    dict_parlukurl_name = pickle.load(open('./pkl/dict_mplink_name.pkl','rb')) # needed for dict_line['name']
+        """
+        try to unpack lines (('i','line'),...) from dict_mpfi into list_lines 
+        but if there are no lines then just return a list with the below dict as the only dict
+        """
+
+        try:
+            mpfi_lines = mpfi[cat]
+        except Exception as e:
+            parsed_lines_mp = [{
+                            'name':dict_name_urls[mpurl]['name'],
+                            'full_text':'N/A',
+                            'date':'N/A',
+                            'orgs':'N/A',
+                            'money':float(0),
+                            'time':float(0),
+                            'role':'N/A',
+                            'total_money_ytd':float(0),
+                            'total_time_ytd':float(0),
+                            'parlukurl':dict_name_urls[mpurl]['parlukurl']
+                            }]
+            
+            try:
+                dict_parsed_lines_all = pickle.load(open('./pkl/dict_parsed_lines.pkl','rb'))
+                dict_parsed_lines_all[mpurl] = parsed_lines_mp
+            except Exception as e:
+                dict_parsed_lines_all = {}
+                dict_parsed_lines_all[mpurl] = parsed_lines_mp
+
+            dict_parsed_lines_file = open('./pkl/dict_parsed_lines.pkl', 'wb')
+            pickle.dump(dict_parsed_lines_all, dict_parsed_lines_file)
+            dict_parsed_lines_file.close()    
+            
+            return parsed_lines_mp
+
+        parsed_lines_mp = []
+        i_list = []
+        for line in mpfi_lines:
+            try:
+                indent = line[0]
+                full_text = line[1]
+
+                dict_line = {}
+                doc = nlp_all_ents(full_text)
+                dict_line['name'] = dict_name_urls[mpurl]['name']
+                dict_line['full_text'] = full_text
+                dict_line['parlukurl'] = dict_name_urls[mpurl]['parlukurl']
+                dict_line['date'] = [ent.text for ent in doc.ents if ent.label_ == 'DATE']
+                dict_line['orgs'] = [ent.text for ent in doc.ents if ent.label_ == 'ORG']
+                dict_line['money'] = [ent.text for ent in doc.ents if ent.label_ == 'MONEY']
+                dict_line['time'] = [ent.text for ent in doc.ents if ent.label_ == 'TIME']
+                dict_line['role'] = [ent.text for ent in doc.ents if ent.label_ == 'ROLE']
+
+                #print(dict_line)
+
+                dict_line['total_money_ytd'] = Extract.total_money_ytd(dict_line)
+                dict_line['total_time_ytd'] = Extract.total_time_ytd(dict_line)
+
+                if dict_line['total_money_ytd'] == 'MANUAL_CHECK' or dict_line['total_time_ytd'] == 'MANUAL_CHECK':
+                    del dict_line['total_money_ytd']
+                    del dict_line['total_time_ytd']
+
+                    print(dict_line['full_text'],'\n')
+                    new_date = input('Enter correct date: ')
+                    new_money = input('Enter correct sum: ')
+                    new_time = input('Enter correct time: ')
+
+                    dict_line['date'] = [new_date]
+                    dict_line['money'] = [new_money]
+                    dict_line['time'] = [new_time]
+
+                    dict_line['total_money_ytd'] = Extract.total_money_ytd(dict_line)
+                    dict_line['total_time_ytd'] = Extract.total_time_ytd(dict_line)
+
+                if indent == 'i':
+                    i_fulltext = dict_line['full_text']
+                    i_orgs = dict_line['orgs']
+                    i_role = dict_line['role']
+                    i_list.append('i')
+
+                if indent == 'i2':
+                    dict_line['full_text'] = i_fulltext+dict_line['full_text']
+                    dict_line['orgs'] = i_orgs+dict_line['orgs']
+                    dict_line['role'] = i_role+dict_line['role']
+                    i_list.append('i2')
+
+                # formatting date and money fields back to strings (from lists) to export to DataFrame
+                dict_line['orgs'] = ', '.join(dict_line['orgs'])
+                dict_line['date'] = ', '.join(dict_line['date'])
+                dict_line['money'] = ', '.join(dict_line['money'])  
+                dict_line['time'] = ', '.join(dict_line['time']) 
+                dict_line['role'] = ', '.join(dict_line['role'])
+
+                # finally, append dict_line to list_mpdata
+                parsed_lines_mp.append(dict_line)
+            except Exception as e:
+                #print(line,e)
+                pass
+        try:
+            dict_parsed_lines_all = pickle.load(open('./pkl/dict_parsed_lines.pkl','rb'))
+            dict_parsed_lines_all[mpurl] = parsed_lines_mp
+        except Exception as e:
+            dict_parsed_lines_all = {}
+            dict_parsed_lines_all[mpurl] = parsed_lines_mp
+
+        dict_parsed_lines_file = open('./pkl/dict_parsed_lines.pkl', 'wb')
+        pickle.dump(dict_parsed_lines_all, dict_parsed_lines_file)
+        dict_parsed_lines_file.close()    
+
+    def parse_lines_all(category: str = 'c1') -> None:
+        # dicts
+        dict_mpfi = pickle.load(open('./pkl/dict_mpfi.pkl','rb'))
+
+        # main logic - if no mpurl is entered then all mpurls in dict_mpfi will be processed
+        failed_urls = []
+        for mpurl, mpfi in tqdm(dict_mpfi.items(), desc="Parsing MPFI"):
+            try:
+                Extract.parse_lines_mp(mpurl, category)
+                #print(mpurl,' SUCCESS')
+            except Exception as e:
+                failed_urls.append((mpurl,e))
+                #print(mpurl,' FAIL')
+
+        return failed_urls
+
+    def manual(mpurl: str, category: str = 'c1') -> None:
+        dict_name_urls = pickle.load(open('./pkl/dict_name_urls.pkl','rb'))
+        dict_mpfi = pickle.load(open('./pkl/dict_mpfi.pkl'))
+
+        mpfi = dict_mpfi[mpurl]
+        cat = Config.categories_dict[category]
+
+        try:
+            mpfi_lines = mpfi[cat]
+        except Exception as e:
+            parsed_lines_mp = [{
+                            'name':dict_name_urls[mpurl]['name'],
+                            'full_text':'N/A',
+                            'date':'N/A',
+                            'orgs':'N/A',
+                            'money':float(0),
+                            'time':float(0),
+                            'role':'N/A',
+                            'total_money_ytd':float(0),
+                            'total_time_ytd':float(0),
+                            'parlukurl':dict_name_urls[mpurl]['parlukurl']
+                            }]
+            #print(mpurl,e)
+            return parsed_lines_mp
+        
+        parsed_lines_mp = []
+        failed_lines = []
+        i_list = []
+        for line in mpfi_lines:
+            try:
+                indent = line[0]
+                full_text = line[1]
+
+                #print('\n')
+                #print('line: ',line)
+                dict_line = {}
+                doc = nlp_all_ents(full_text)
+                dict_line['name'] = dict_name_urls[mpurl]['name']
+                dict_line['full_text'] = full_text
+                dict_line['parlukurl'] = dict_name_urls[mpurl]['parlukurl']
+                dict_line['date'] = [ent.text for ent in doc.ents if ent.label_ == 'DATE']
+                dict_line['orgs'] = [ent.text for ent in doc.ents if ent.label_ == 'ORG']
+                dict_line['money'] = [ent.text for ent in doc.ents if ent.label_ == 'MONEY']
+                dict_line['time'] = [ent.text for ent in doc.ents if ent.label_ == 'TIME']
+                dict_line['role'] = [ent.text for ent in doc.ents if ent.label_ == 'ROLE']
+
+                #print(dict_line)
+
+                dict_line['total_money_ytd'] = Extract.total_money_ytd(dict_line)
+                dict_line['total_time_ytd'] = Extract.total_time_ytd(dict_line)
+
+                if indent == 'i':
+                    i_fulltext = dict_line['full_text']
+                    i_orgs = dict_line['orgs']
+                    i_role = dict_line['role']
+                    i_list.append('i')
+
+                if indent == 'i2':
+                    dict_line['full_text'] = i_fulltext+dict_line['full_text']
+                    dict_line['orgs'] = i_orgs+dict_line['orgs']
+                    dict_line['role'] = i_role+dict_line['role']
+                    i_list.append('i2')
+
+                # formatting date and money fields back to strings (from lists) to export to DataFrame
+                dict_line['orgs'] = ', '.join(dict_line['orgs'])
+                dict_line['date'] = ', '.join(dict_line['date'])
+                dict_line['money'] = ', '.join(dict_line['money'])  
+                dict_line['time'] = ', '.join(dict_line['time']) 
+                dict_line['role'] = ', '.join(dict_line['role'])
+
+                # finally, append dict_line to list_mpdata
+                parsed_lines_mp.append(dict_line)
+
+            except Exception as e:
+                failed_lines.append(line)
+        
+        for line in failed_lines:
+            #print('\n',line,'\n')
+
+            input_org = input('Enter organizations:').split('#')
+            input_money = input('Enter money:').split('#')
+            input_time = input('Enter hours:').split('#')
+            input_date = input('Enter dates:').split('#')
+            input_role = input('Enter roles:').split('#')
+
+            dict_line = {}
+            dict_line['name'] = dict_name_urls[mpurl]['name']
+            dict_line['full_text'] = [line]
+            dict_line['parlukurl'] = dict_name_urls[mpurl]['parlukurl']
+            dict_line['date'] = input_date
+            dict_line['orgs'] = input_org
+            dict_line['money'] = input_money
+            dict_line['time'] = input_time
+            dict_line['role'] = input_role
+
+            dict_line['total_money_ytd'] = Extract.total_money_ytd(dict_line)
+            dict_line['total_time_ytd'] = Extract.total_time_ytd(dict_line)
+
+            if indent == 'i':
+                i_fulltext = dict_line['full_text']
+                i_orgs = dict_line['orgs']
+                i_role = dict_line['role']
+                i_list.append('i')
+            
+            if indent == 'i2':
+                dict_line['full_text'] = i_fulltext+dict_line['full_text']
+                dict_line['orgs'] = i_orgs+dict_line['orgs']
+                dict_line['role'] = i_role+dict_line['role']
+                i_list.append('i2')
+            
+            # formatting date and money fields back to strings (from lists) to export to DataFrame
+            dict_line['orgs'] = ', '.join(dict_line['orgs'])
+            dict_line['date'] = ', '.join(dict_line['date'])
+            dict_line['money'] = ', '.join(dict_line['money'])  
+            dict_line['time'] = ', '.join(dict_line['time']) 
+            dict_line['role'] = ', '.join(dict_line['role'])
+
+            parsed_lines_mp.append(dict_line)
+        
+        parsed_lines_all = pickle.load(open('./pkl/dict_parsed_lines.pkl','rb'))
+        if mpurl in parsed_lines_all.keys():
+            del parsed_lines_all[mpurl]
+        parsed_lines_all[mpurl] = parsed_lines_mp
+
+        parsed_lines_file = open('./pkl/dict_parsed_lines.pkl', 'wb')
+        pickle.dump(parsed_lines_all, parsed_lines_file)
+        parsed_lines_file.close()
+
+        # return failed_lines if wanted for additional NER training
+        return failed_lines
+
+class Export:
+    """
+    The Export class contains the functions used to turn parsed_lines into pandas DataFrames and then Excel spreadsheets.
+    """    
+
+    def df() -> pd.DataFrame:
+        dict_other_info = pickle.load(open('./pkl/dict_other_info.pkl','rb'))
+        dict_parsed_lines = pickle.load(open('./pkl/dict_parsed_lines.pkl','rb'))
+
+        # SHEET 1 - MP OVERVIEW
+        df_other_info = pd.DataFrame(dict_other_info).transpose()
+
+        # Calculate sum_money_ytd and sum_time_ytd for MP Overview sheet and then add to dict_sum_moneytime { 'mpurl':{'sum_money_ytd':VALUE, 'sum_time_ytd':VALUE}, ...
+        dict_sum_moneytime = {}
+        for mpurl, parsed_lines in tqdm(dict_parsed_lines.items(), desc="Calculating Total £/hours"):
+            list_total_money_ytd = []
+            list_total_time_ytd = []
+            for line in parsed_lines:
+                list_total_money_ytd.append(line['total_money_ytd'])
+                list_total_time_ytd.append(line['total_time_ytd'])
+            dict_sum_moneytime[mpurl] = {
+                'sum_money_ytd': sum([i for i in list_total_money_ytd if type(i) is float or type(i) is int]),
+                'sum_time_ytd': sum([i for i in list_total_time_ytd if type(i) is float or type(i) is int])
+            }
+
+        df_sum_moneytime = pd.DataFrame(dict_sum_moneytime).transpose()
+
+        df_mp_overview = pd.concat([df_sum_moneytime, df_other_info], axis=1)
+        df_mp_overview = df_mp_overview[["name", "sum_money_ytd","sum_time_ytd","basic_salary","lalp_payment","party","constituency","region","country","assumed_office","years_in_office","majority"]]
+        df_mp_overview = df_mp_overview.rename(columns = {
+            'name':'Name',
+            'sum_money_ytd':'Total Earnings YTD (£)',
+            'sum_time_ytd': 'Total Hours Worked YTD',
+            'basic_salary': 'Basic MP Salary (2020-21)',
+            'lalp_payment': 'LALP (2020-21)',
+            'party':'Political Party',
+            'constituency':'Constituency',
+            'region':'Region',
+            'country':'Country',
+            'assumed_office':'Date Assumed Office',
+            'years_in_office': 'Years in Office',
+            'majority': 'Majority (%)'
+        })
+        df_mp_overview = df_mp_overview.set_index('Name')
+        df_mp_overview = df_mp_overview.sort_index(ascending=True)
+        df_mp_overview = df_mp_overview.fillna(0)
+
+        # SHEET 2 - EARNINGS BREAKDOWN - create df from list_lines and re-name columns
+        list_lines = []
+        for mplist in tqdm(list(dict_parsed_lines.values()), desc="Adding parsed lines to DataFrame"):
+            for line in mplist:
+                list_lines.append(line)    
+
+        df_mpfi = pd.DataFrame(list_lines)
+        df_earnings_breakdown = df_mpfi[["name","orgs","role","money","time","date","total_money_ytd","total_time_ytd","full_text","parlukurl"]]
+        df_earnings_breakdown = df_earnings_breakdown.rename(columns={
+            'name':'Name',
+            'money':'Earnings (RAW)',
+            'time':'Hours worked (RAW)',
+            'date':'Date of Earnings',
+            'orgs':'Client/Organisation',
+            'role':'Role',
+            'total_money_ytd':'Earnings YTD (£)',
+            'total_time_ytd':'Hours worked YTD',
+            'full_text':'Original text',
+            'parlukurl':'Source'
+        })
+        df_earnings_breakdown = df_earnings_breakdown.set_index('Name')
+        df_earnings_breakdown = df_earnings_breakdown.sort_index(ascending=True)
+        df_earnings_breakdown = df_earnings_breakdown.fillna(0)
+
+        return df_mp_overview, df_earnings_breakdown
+
+    def xlsx(workbook_name: str, func) -> None:
+        
+        df1, df2 = func()
+
+        writer = pd.ExcelWriter(workbook_name, engine='xlsxwriter')
+
+        workbook = writer.book
+        worksheet0 = workbook.add_worksheet('Intro')
+        df1.to_excel(writer, sheet_name='MP overview')
+        df2.to_excel(writer, sheet_name='Earnings breakdown')
+
+        # Sheet 0
+        worksheet0.set_column('A:A', 110)
+
+        title = workbook.add_format({'bold': True})
+        sub_title = workbook.add_format({'italic': True})
+
+        worksheet0.write('A1','MP FINANCIAL INTERESTS DATA - STRUCTURED',title)
+        worksheet0.write('A2','by Andrew Kyriacos-Messios',sub_title)
+        worksheet0.write('A4','Sheet 1: MP Overview - Totals of second job MP earnings and hours worked for the year-to-date',title)
+        worksheet0.write('A5','Total Earnings YTD (£) - Total declared employment earnings outside of MP work in the last year',sub_title)
+        worksheet0.write('A6','Total Hours Worked YTD - Total declared hours spent working outside of MP work in the last year',sub_title)
+        worksheet0.write('A7','Basic MP Salary (2020-21) - Salary received as a Member of Parliament in 2020-21 (not included in Total Earnings YTD)',sub_title)
+        worksheet0.write('A8','LALP (2020-21) - Sum received as a London Area Living Payment adjustment in 2020-21',sub_title)
+        worksheet0.write('A9','Political Party',sub_title)
+        worksheet0.write('A10','Constituency, Region, Country',sub_title)
+        worksheet0.write('A11','Date Assumed Office and Years in Office',sub_title)
+        worksheet0.write('A12','Majority - % majority won in last election',sub_title)  
+        
+        worksheet0.write('A14','Sheet 2: Earnings breakdown - A line-by-line breakdown for sources of earnings for each MP',title)
+        worksheet0.write('A15','Client, Role',sub_title)
+        worksheet0.write('A16','Earnings (RAW) - Payment amount declared by MP (e.g. £150, £2,000 per month)',sub_title)
+        worksheet0.write('A17','Hours Worked (RAW) - hours worked declared by MP (e.g. 30 mins, 10 hrs per month)',sub_title)
+        worksheet0.write('A18','Date of Earnings - Date on which payment was received or dates between which ongoing work occurred',sub_title)
+        worksheet0.write('A19','Earnings YTD (£) - Approximation of % of payment received in the last year (e.g. annual salary * % of year elapsed)',sub_title)
+        worksheet0.write('A20','Hours Worked YTD - Approximation of % of hours worked in the last year (e.g. annual time commitment * % of year elapsed)',sub_title)
+        worksheet0.write('A21','Original text - Original text from the Register of MP Financial Interests',sub_title)
+        worksheet0.write('A22','Source - Hyperlink to the corresponding record in the Register of MP Financial Interests',sub_title)
+
+        worksheet0.write('A24','Journalists and researchers: please double-check data and cross-reference against the original material before publishing.',title)
+        worksheet0.write('A26','Questions or feedback? :-) Contact me andrew@andrewkmessios.com',title)
+
+        worksheet0.write('A28','Sources:',title)
+        worksheet0.write('A29','https://www.parliament.uk/mps-lords-and-offices/standards-and-financial-interests/parliamentary-commissioner-for-standards/registers-of-interests/register-of-members-financial-interests/')
+        worksheet0.write('A30','https://www.parallelparliament.co.uk/')
+        worksheet0.write('A31','https://theipsa.org.uk/')
+        worksheet0.write('A32','https://en.wikipedia.org/wiki/Diane_Abbott')
+        worksheet0.write('A33','https://dbpedia.org/page/')
+
+        # Sheet 1 - MP Overview
+        format_all_columns = workbook.add_format({'align':'center'})
+        format_currency = workbook.add_format({'align':'center', 'num_format': "£#,##0.00", 'bold': True})
+        format_time = workbook.add_format({'align':'center', 'bold': True})
+        format_timedate = workbook.add_format({'align':'center', 'num_format': 'dd mmmm yyyy'})
+
+        worksheet1 = writer.sheets['MP overview']
+
+        worksheet1.set_column(0, 0, 25, format_all_columns) # name
+        worksheet1.set_column(1, 1, 20, format_currency) # sum_money_ytd
+        worksheet1.set_column(2, 2, 20, format_time) # sum_time_ytd
+        worksheet1.set_column(3, 3, 22.5, format_currency) # basic_salary
+        worksheet1.set_column(4, 4, 15, format_currency) # lalp_payment
+        worksheet1.set_column(5, 5, 15, format_all_columns) # party
+        worksheet1.set_column(6, 6, 40, format_all_columns) # constituency
+        worksheet1.set_column(7, 7, 25, format_all_columns) # region
+        worksheet1.set_column(8, 8, 15, format_all_columns) # country
+        worksheet1.set_column(9, 9, 20, format_timedate) # assumed_office
+        worksheet1.set_column(10, 10, 15, format_all_columns) # years_in_office
+        worksheet1.set_column(11, 11, 15, format_all_columns) # majority
+
+        # Sheet 2 - Earnings breakdown
+        worksheet2 = writer.sheets['Earnings breakdown']
+        worksheet2.set_column(0, 0, 25, format_all_columns) # name
+        worksheet2.set_column(1, 1, 40, format_all_columns) # organisation
+        worksheet2.set_column(2, 2, 40, format_all_columns) # role
+        worksheet2.set_column(3, 3, 20, format_all_columns) # earnings_raw
+        worksheet2.set_column(4, 4, 20, format_all_columns) # hours_raw
+        worksheet2.set_column(5, 5, 40, format_all_columns) # date
+        worksheet2.set_column(6, 6, 20, format_currency) # total_money_ytd
+        worksheet2.set_column(7, 7, 20, format_time) # total_time_ytd
+        worksheet2.set_column(8, 8, 100, format_all_columns) # full_text
+        worksheet2.set_column(9, 9, 100, format_all_columns) # source
+
+        # save and close
+        writer.save()
+
+# exec
+if __name__ == "__main__":
+    # variables
+    print('loading dates...')
+    # date = sys.argv[1]
+    # date_words = sys.argv[2]
+    date = '220228'
+    date_words = '28 February 2022'
+    election_date = '191212'
+    election_date_words = '12 December 19'
     mpfi_date = dateutil.parser.parse(date, yearfirst=True)
     mpfi_date_minus_one_year = mpfi_date+datetime.timedelta(-365)
 
-    # begin creating dict_line
-    list_mpdata = []
-    i_list = []
-    for line in lines:
-        print('\n')
-        print('line: ',line)
-        dict_line = {}
-        doc = nlp(line[1])
-        dict_line['name'] = dict_parlukurl_name[parluk_url]
-        dict_line['full_text'] = [line[1]]
-        dict_line['date'] = [ent.text for ent in doc.ents if ent.label_ == 'DATE']
-        dict_line['orgs'] = [ent.text for ent in doc.ents if ent.label_ == 'ORG']
-        dict_line['money'] = [ent.text for ent in doc.ents if ent.label_ == 'MONEY']
-        dict_line['time'] = [ent.text for ent in doc.ents if ent.label_ == 'TIME']
-        dict_line['role'] = [ent.text for ent in doc.ents if ent.label_ == 'ROLE']
+    # spaCy models
+    print('loading spaCy...')
+    nlp_trf = spacy.load('en_core_web_trf')
+    nlp_time = spacy.load('./ner_models/time/model-best/')
+    nlp_money = spacy.load("./ner_models/money/model-best")
+    nlp_all_ents = spacy.load("./ner_models/all_ents/model-best")
 
-        print(dict_line)
+    # delete old dicts
+    # print('\n','removing old dicts...')
+    # for pklpath in ['./pkl/dict_name_urls.pkl','./pkl/dict_mpfi.pkl','./pkl/dict_parsed_lines.pkl']:
+    #     if os.path.isfile(pklpath): os.remove(pklpath)
+    #     else: pass
 
-        dict_line['total_money_ytd'] = total_money_ytd(dict_line)
-        dict_line['total_time_ytd'] = total_time_ytd(dict_line)
+    # print('\n','Scraping links...')
+    # failed_urls_links = Scrape.links(date)
 
-        print("dict_line['total_money_ytd']",dict_line['total_money_ytd'])
-        print("dict_line['total_time_ytd']",dict_line['total_time_ytd'])
+    # print('\n','Scraping MPFI...')
+    # failed_urls_mpfi = Scrape.mpfi()
 
-        if line[0] == 'i':
-            i_fulltext = dict_line['full_text']
-            i_orgs = dict_line['orgs']
-            i_role = dict_line['role']
-            i_list.append('i')
-    
-        if line[0] == 'i2':
-            dict_line['full_text'] = i_fulltext+dict_line['full_text']
-            dict_line['orgs'] = i_orgs+dict_line['orgs']
-            dict_line['role'] = i_role+dict_line['role']
-            i_list.append('i2')
+    print('\n','Extracting...')
+    failed_urls_parse = Extract.parse_lines_all()
 
-        # formatting date and money fields back to strings (from lists) to export to DataFrame
-        dict_line['full_text'] = ', '.join(dict_line['full_text'])
-        dict_line['orgs'] = ', '.join(dict_line['orgs'])
-        dict_line['date'] = ', '.join(dict_line['date'])
-        dict_line['money'] = ', '.join(dict_line['money'])  
-        dict_line['time'] = ', '.join(dict_line['time']) 
-        dict_line['role'] = ', '.join(dict_line['role'])
+    print('\n','Exporting...')
+    filename = './excel/'+date+'.xlsx'
+    Export.xlsx(filename,Export.df)
 
-        # finally, append dict_line to list_mpdata
-        list_mpdata.append(dict_line)
-    
-    # # filter out all 'i' indented lines
-    # for i in i_index:
-    #     try:
-    #         if i+1 != i_index[i+1]:
-    #             del list_mpdata[i]
-    #     except:
-    #         pass
-
-    ## filter out all 'i' indented lines
-    # print('i_list: ',i_list)
-    # i_count = []
-    # for count, i in enumerate(i_list):
-    #     if i == 'i':
-    #         i2_check = False
-    #     elif i == 'i2' and i2_check == False:
-    #         i_count.append(count-1)
-    #         i2_check = True
-    #     else:
-    #         pass
-    # print('i_count: ',i_count)
-    # for i in i_count:
-    #     del list_mpdata[i]
-
-    return list_mpdata
-
-def parse_all_mpfi_pkl(date, heading_ref):
-    dict_parlurl_mpname = pickle.load(open('./pkl/dict_mplink_name.pkl','rb'))
-
-    list_all_mpdata = []
-    failed_urls = []
-
-    for url in tqdm(dict_parlurl_mpname.keys()):
-        print(url,'\n')
-        try:
-            list_mpdata = parse_mpfi_pkl(date, url, heading_ref)
-            if list_mpdata is None:
-                pass
-            else:
-                list_all_mpdata = list_all_mpdata + list_mpdata
-        except:
-            failed_urls.append(url)
-    
-    ## save list_allmpdata to a pkl
-    dict_df_file = open('./pkl/dict_df.pkl', 'wb')
-    pickle.dump(list_all_mpdata, dict_df_file)
-    dict_df_file.close()
-
-    dict_failed_urls_file = open('./pkl/dict_failed_urls.pkl','wb')
-    pickle.dump(failed_urls, dict_failed_urls_file)
-    dict_failed_urls_file.close()
-    
-    return list_all_mpdata, failed_urls
-
-#list_all_mpdata, failed_urls = parse_all_mpfi_pkl(date, headings_dict['h1'])
-
-## Manual checks
-def manual_checks():
-    list_all_mpdata = pickle.load(open('./pkl/dict_df.pkl','rb'))
-
-    for item in list_all_mpdata:
-        if item['total_money_ytd'] == 'MANUAL_CHECK' and item['total_time_ytd'] == 'MANUAL_CHECK':
-            print('\n',item)
-            new_money_ytd = float(input('Enter total_money_ytd: '))
-            new_time_ytd = float(input('Enter total_time_ytd: '))
-            item['total_money_ytd'] = new_money_ytd
-            item['total_time_ytd'] = new_time_ytd
-        elif item['total_money_ytd'] == 'MANUAL_CHECK':
-            print('\n',item)
-            new_money_ytd = float(input('Enter total_money_ytd: '))
-            item['total_money_ytd'] = new_money_ytd
-        elif item['total_time_ytd'] == 'MANUAL_CHECK':
-            print('\n',item)
-            new_time_ytd = float(input('Enter total_time_ytd: '))
-            item['total_time_ytd'] = new_time_ytd
-        else:
-            pass
-
-        dict_df_file = open('./pkl/dict_df.pkl', 'wb')
-        pickle.dump(list_all_mpdata, dict_df_file)
-        dict_df_file.close()
-
-    return list_all_mpdata
-
-#list_all_mpdata = manual_checks()
-
-##########################
-## 3. CREATE DATAFRAMES ##
-##########################
-
-# MAIN SHEET - EARNINGS BREAKDOWN
-def create_dataframes():
-    df_mpfi = pd.DataFrame(pickle.load(open('./pkl/dict_df.pkl','rb')))
-    df_earnings_breakdown = df_mpfi[["name","orgs","role","money","time","date","total_money_ytd","total_time_ytd","full_text"]]
-    df_earnings_breakdown = df_earnings_breakdown.rename(columns={
-        'name':'Name',
-        'money':'Earnings (RAW)',
-        'time':'Hours worked (RAW)',
-        'date':'Date of Earnings',
-        'orgs':'Client/Organisation',
-        'role':'Role',
-        'total_money_ytd':'Earnings YTD (£)',
-        'total_time_ytd':'Hours worked YTD',
-        'full_text':'Original text (from source)'
-    })
-
-    # TOTAL MONEY/TIME YTD SHEET
-    def sum_timemoney(dataframe):
-        dict_parlukurl_name = pickle.load(open('./pkl/dict_mplink_name.pkl','rb'))
-        df = dataframe
-
-        list_totals = []
-        for url, mp_name in dict_parlukurl_name.items():
-            print('mp_name: ',mp_name)
-            sm_list = [item for item in df.loc[df['Name'] == dict_parlukurl_name[url], 'Earnings YTD (£)'].to_list() if type(item) is float or type(item) is int]
-            print('sm_list: ',sm_list)
-            st_list = [item for item in df.loc[df['Name'] == dict_parlukurl_name[url], 'Hours worked YTD'].to_list() if type(item) is float or type(item) is int]
-            print('st_list: ',st_list)
-
-            dict_totals = {}
-            dict_totals['name'] = dict_parlukurl_name[url]
-            dict_totals['sum_money_ytd'] = sum(sm_list)
-            print('sum_money_ytd: ',dict_totals['sum_money_ytd'])
-            dict_totals['sum_time_ytd'] = sum(st_list)
-            print('sum_time_ytd: ',dict_totals['sum_time_ytd'])
-            print('\n')
-
-            list_totals.append(dict_totals)
-
-            # print('name:',mp_name)
-            # print('sum_money:',sum(sm_list))
-            # print('sum_time:',sum(st_list))
-            # print('\n')
-        
-        return list_totals
-
-    list_totals = sum_timemoney(df_earnings_breakdown)
-    df_totals = pd.DataFrame(list_totals).set_index('name')
-
-    dict_mpinfo_political = pickle.load(open('./pkl/dict_mpinfo_political.pkl','rb'))
-    df_mpinfo_political = pd.DataFrame(dict_mpinfo_political).transpose()
-    df_mpinfo_political
-
-    df_mp_overview = pd.concat([df_totals, df_mpinfo_political], axis=1)
-    df_mp_overview = df_mp_overview[["sum_money_ytd","sum_time_ytd","basic_salary","lalp_payment","party","constituency","region","country","assumed_office","years_in_office","majority"]]
-    df_mp_overview = df_mp_overview.rename(columns = {
-        'sum_money_ytd':'Total Earnings YTD (£)',
-        'sum_time_ytd': 'Total Hours Worked YTD',
-        'basic_salary': 'Basic MP Salary (2020-21)',
-        'lalp_payment': 'LALP (2020-21)',
-        'party':'Political Party',
-        'constituency':'Constituency',
-        'region':'Region',
-        'country':'Country',
-        'assumed_office':'Date Assumed Office',
-        'years_in_office': 'Years in Office',
-        'majority': 'Majority (%)'
-    })
-
-    return df_mp_overview, df_earnings_breakdown
-
-#df_mp_overview, df_earnings_breakdown = create_dataframes()
-
-###############
-## 4. EXPORT ##
-###############
-
-def export_xlsx(workbook_name, df1, df2):
-    writer = pd.ExcelWriter(workbook_name, engine='xlsxwriter')
-
-    workbook = writer.book
-    worksheet0 = workbook.add_worksheet('Intro')
-
-    df1.to_excel(writer, sheet_name='MP overview')
-    df2.to_excel(writer, sheet_name='Earnings breakdown')
-
-    format_all_columns = workbook.add_format({'align':'left'})
-    format_currency = workbook.add_format({'align':'left', 'num_format': "£#,##0.00", 'bold': True})
-    format_time = workbook.add_format({'align':'left', 'bold': True})
-    format_timedate = workbook.add_format({'align':'left', 'num_format': 'dd mmmm yyyy'})
-
-    # Sheet 0
-    worksheet0.set_column('A:A', 100)
-    worksheet0.set_row(3, 200)
-
-    title = workbook.add_format({'bold': True})
-    sub_title = workbook.add_format({'italic': True})
-
-    worksheet0.write('A1','MP FINANCIAL INTERESTS DATA - STRUCTURED', title)
-    worksheet0.write('A2','by Andrew Kyriacos-Messios', sub_title)
-
-    # Sheet 1
-    worksheet1 = writer.sheets['MP overview']
-    worksheet1.set_column(0, 0, 25, format_all_columns) # name
-    worksheet1.set_column(1, 1, 20, format_currency) # sum_money_ytd
-    worksheet1.set_column(2, 2, 20, format_time) # sum_time_ytd
-    worksheet1.set_column(3, 3, 20, format_currency) # basic_salary
-    worksheet1.set_column(4, 4, 20, format_currency) # lalp_payment
-    worksheet1.set_column(5, 5, 25, format_all_columns) # party
-    worksheet1.set_column(6, 6, 15, format_all_columns) # constituency
-    worksheet1.set_column(7, 7, 25, format_all_columns) # region
-    worksheet1.set_column(8, 8, 15, format_all_columns) # country
-    worksheet1.set_column(9, 9, 15, format_timedate) # assumed_office
-    worksheet1.set_column(10, 10, 15, format_all_columns) # years_in_office
-    worksheet1.set_column(11, 11, 15, format_all_columns) # majority
-
-    # Sheet 2
-    worksheet2 = writer.sheets['Earnings breakdown']
-    worksheet2.set_column(0, 0, 5, format_all_columns) # index
-    worksheet2.set_column(1, 1, 25, format_all_columns) # name
-    worksheet2.set_column(2, 2, 25, format_all_columns) # money
-    worksheet2.set_column(3, 3, 25, format_all_columns) # time
-    worksheet2.set_column(4, 4, 40, format_all_columns) # date
-    worksheet2.set_column(5, 5, 40, format_all_columns) # orgs
-    worksheet2.set_column(6, 6, 40, format_all_columns) # role
-    worksheet2.set_column(7, 7, 20, format_currency) # total_money_ytd
-    worksheet2.set_column(8, 8, 20, format_time) # total_time_ytd
-    worksheet2.set_column(9, 9, 250, format_all_columns) # full_text
-
-    # save and close
-    writer.save()
-
-#xlsx_filename = './excel/'+date+'.xlsx'
-#export_xlsx(xlsx_filename, df_mp_overview, df_earnings_breakdown)
+    print('\n','*********************************')
+    # print('failed_urls_links: ',failed_urls_links)
+    # print('failed_urls_mpfi: ',failed_urls_mpfi)
+    print('failed_urls_parse: ',failed_urls_parse)
