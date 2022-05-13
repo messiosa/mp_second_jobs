@@ -50,7 +50,7 @@ class Scrape:
         -> only needs to be run once (this information won't change)
         -> saved as a dictionary in the format: {'constituency1': ('region', 'country'), 'constituency2': ('region', 'country'), ...}
     
-    all_links(date) -> None
+    links(date) -> None
         -> scrapes indexes from all web sources (parluk, pp, wiki, ipsa, db) to create a dict of all the individual mp urls needed
         -> creates ./pkl/dict_name_urls.pkl
         -> run it every time there's a new update on The Register (bi-weekly)
@@ -414,7 +414,7 @@ class Scrape:
             failed_urls = []
             if mpurl is None:
                 dict_mpfi = {}
-                for mpurl, name_urls in tqdm(dict_name_urls.items(), desc="MPFI"):
+                for mpurl, name_urls in tqdm(dict_name_urls.items(), desc=mpurl):
                     parlukurl = name_urls['parlukurl']
                     try:
                         dict_indv_mpfi = get_indv_dict(parlukurl)
@@ -957,10 +957,14 @@ class Extract:
                     del dict_line['total_money_ytd']
                     del dict_line['total_time_ytd']
 
+                    print('\n')
                     print(dict_line['full_text'],'\n')
                     new_date = input('Enter correct date: ')
+                    print('\n')
                     new_money = input('Enter correct sum: ')
+                    print('\n')
                     new_time = input('Enter correct time: ')
+                    print('\n')
 
                     dict_line['date'] = [new_date]
                     dict_line['money'] = [new_money]
@@ -1010,7 +1014,7 @@ class Extract:
 
         # main logic - if no mpurl is entered then all mpurls in dict_mpfi will be processed
         failed_urls = []
-        for mpurl, mpfi in tqdm(dict_mpfi.items(), desc="Parsing MPFI"):
+        for mpurl, mpfi in tqdm(dict_mpfi.items(), desc=mpurl):
             try:
                 Extract.parse_lines_mp(mpurl, category)
                 #print(mpurl,' SUCCESS')
@@ -1329,21 +1333,21 @@ if __name__ == "__main__":
     nlp_all_ents = spacy.load("./ner_models/all_ents/model-best")
 
     #delete old dicts
-    print('\n','removing old dicts...')
+    print('removing old dicts...')
     for pklpath in ['./pkl/dict_name_urls.pkl','./pkl/dict_mpfi.pkl','./pkl/dict_parsed_lines.pkl']:
         if os.path.isfile(pklpath): os.remove(pklpath)
         else: pass
 
-    print('\n','Scraping links...')
+    print('Scraping links...')
     failed_urls_links = Scrape.links(date)
 
-    print('\n','Scraping MPFI...')
+    print('Scraping MPFI...')
     failed_urls_mpfi = Scrape.mpfi()
 
-    print('\n','Extracting...')
+    print('Extracting...')
     failed_urls_parse = Extract.parse_lines_all()
 
-    print('\n','Exporting...')
+    print('Exporting...')
     filename = './excel/'+date+'.xlsx'
     Export.xlsx(filename,Export.df)
 
