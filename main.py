@@ -1,5 +1,4 @@
 import pickle, requests, os, spacy, time, datefinder, datetime, dateutil, re, urllib.parse, sys
-from pydantic import Extra
 import pandas as pd
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -1315,33 +1314,31 @@ class Export:
 if __name__ == "__main__":
     # variables
     print('loading dates...')
-    # date = sys.argv[1]
-    # date_words = sys.argv[2]
-    date = '220228'
-    date_words = '28 February 2022'
+    date = sys.argv[1]
+    date_words = sys.argv[2]
     election_date = '191212'
     election_date_words = '12 December 19'
     mpfi_date = dateutil.parser.parse(date, yearfirst=True)
     mpfi_date_minus_one_year = mpfi_date+datetime.timedelta(-365)
 
     # spaCy models
-    print('loading spaCy...')
+    print('loading spaCy models...')
     nlp_trf = spacy.load('en_core_web_trf')
     nlp_time = spacy.load('./ner_models/time/model-best/')
     nlp_money = spacy.load("./ner_models/money/model-best")
     nlp_all_ents = spacy.load("./ner_models/all_ents/model-best")
 
-    # delete old dicts
-    # print('\n','removing old dicts...')
-    # for pklpath in ['./pkl/dict_name_urls.pkl','./pkl/dict_mpfi.pkl','./pkl/dict_parsed_lines.pkl']:
-    #     if os.path.isfile(pklpath): os.remove(pklpath)
-    #     else: pass
+    #delete old dicts
+    print('\n','removing old dicts...')
+    for pklpath in ['./pkl/dict_name_urls.pkl','./pkl/dict_mpfi.pkl','./pkl/dict_parsed_lines.pkl']:
+        if os.path.isfile(pklpath): os.remove(pklpath)
+        else: pass
 
-    # print('\n','Scraping links...')
-    # failed_urls_links = Scrape.links(date)
+    print('\n','Scraping links...')
+    failed_urls_links = Scrape.links(date)
 
-    # print('\n','Scraping MPFI...')
-    # failed_urls_mpfi = Scrape.mpfi()
+    print('\n','Scraping MPFI...')
+    failed_urls_mpfi = Scrape.mpfi()
 
     print('\n','Extracting...')
     failed_urls_parse = Extract.parse_lines_all()
@@ -1351,6 +1348,6 @@ if __name__ == "__main__":
     Export.xlsx(filename,Export.df)
 
     print('\n','*********************************')
-    # print('failed_urls_links: ',failed_urls_links)
-    # print('failed_urls_mpfi: ',failed_urls_mpfi)
+    print('failed_urls_links: ',failed_urls_links)
+    print('failed_urls_mpfi: ',failed_urls_mpfi)
     print('failed_urls_parse: ',failed_urls_parse)
