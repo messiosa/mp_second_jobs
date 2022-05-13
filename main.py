@@ -433,6 +433,11 @@ class Scrape:
             pickle.dump(dict_mpfi, dict_mpfi_file)
             dict_mpfi_file.close()
 
+            # save backup
+            dict_mpfi_backup_file = open('./pkl/mpfi_by_date/'+date+'.pkl', 'wb')
+            pickle.dump(dict_mpfi, dict_mpfi_backup_file)
+            dict_mpfi_backup_file.close()
+
             return failed_urls
 
     def other_info(mpurl: str = None) -> None:
@@ -1014,7 +1019,7 @@ class Extract:
 
         # main logic - if no mpurl is entered then all mpurls in dict_mpfi will be processed
         failed_urls = []
-        for mpurl, mpfi in tqdm(dict_mpfi.items(), desc=mpurl):
+        for mpurl, mpfi in tqdm(dict_mpfi.items(), desc='Extracting'):
             try:
                 Extract.parse_lines_mp(mpurl, category)
                 #print(mpurl,' SUCCESS')
@@ -1332,7 +1337,7 @@ if __name__ == "__main__":
     nlp_money = spacy.load("./ner_models/money/model-best")
     nlp_all_ents = spacy.load("./ner_models/all_ents/model-best")
 
-    #delete old dicts
+    # delete old dicts
     print('removing old dicts...')
     for pklpath in ['./pkl/dict_name_urls.pkl','./pkl/dict_mpfi.pkl','./pkl/dict_parsed_lines.pkl']:
         if os.path.isfile(pklpath): os.remove(pklpath)

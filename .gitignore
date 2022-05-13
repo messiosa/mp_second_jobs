@@ -8,6 +8,7 @@ pkl/dict_mpfi.pkl
 pkl/dict_name_urls.pkl
 pkl/dict_parsed_lines.pkl
 bonus_round.md
+pkl/mpfi_by_date/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
