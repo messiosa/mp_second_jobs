@@ -10,7 +10,7 @@ With the data produced by the Scanner you can now, at a quick glance, see how mu
 
 This resource is open-source and free to use for members of the public, journalists, data scientists, researchers, and whoever else might be interested. **I would love to hear what it's being used for! Drop me a quick email at andrew@andrewkmessios.com and tell me about it :)**
 
-_*As of April 2022, MPs now earn £84,411 per year, compared to £81,932 in 2020-21. The scanner uses the 2020-21 salary as total second job earnings are summed year-to-date._
+_*As of April 2022, MPs now earn £84,411 per year, compared to £81,932 in 2020-21. The scanner uses the 2020-21 salary for now as IPSA hasn't updated to the new salary range._
 
 ![Screenshot - MP Overview](./readme_files/screenshot1.jpg)
 ![Screenshot2 - Earnings breakdown](./readme_files/screenshot2.jpg)
@@ -21,9 +21,9 @@ The Scanner uses machine-learning with custom-trained [NER](https://monkeylearn.
 
 The data is exported as excel spreadsheets saved in the **/excel** folder. Each spreadsheet is named after the corresponding date of the Register entry _e.g._ 3rd of May 2022 = 220503.xlsx 
 
-**_NB: While the MPFI scraper works perfectly 99% of the time, it will on occasion miss or miscategorise data resulting in errors. If something looks off, it might well be. Please do some due dilligence and double-check the data yourself against the original source. And if there are any glaring errors, please let me know._**
+**_NB: While the Scanner works perfectly most of the time, it will on occasion miss or miscategorise data resulting in errors. If something looks off, it might well be. Please do some due dilligence and double-check the data yourself against the original source. And if there are any glaring errors, please let me know._**
 
-## Running the MPFI scraper yourself
+## Running the Scanner yourself
 
 If you want to run the Scanner yourself, go for it. It's pretty easy. While it works well, sometimes it does hit a bug which you might have to go and fix. I do this myself for the final spreadsheets in the **/excel** folder but if you want to do the scraping then you'll have to! Feel free to get in touch if you have any questions about it.
 
