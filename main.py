@@ -1,5 +1,5 @@
 import pickle, requests, os, spacy, time, datefinder, datetime, dateutil, re, urllib.parse, sys
-import pandas as pd
+import pandas as pd, numpy as np
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.edge.options import Options
@@ -429,6 +429,7 @@ class Scrape:
                 dict_indv_mpfi = get_indv_dict(parlukurl)
                 dict_mpfi[mpurl] = dict_indv_mpfi
 
+            # save to pkl
             dict_mpfi_file = open('./pkl/dict_mpfi.pkl', 'wb')
             pickle.dump(dict_mpfi, dict_mpfi_file)
             dict_mpfi_file.close()
@@ -445,96 +446,177 @@ class Scrape:
             dict_constituencies = pickle.load(open('./pkl/dict_constituencies.pkl','rb'))
 
             def get_indv_dict(mpurl):
-                # DICTIONARY
-                dict_indv_mp = {
-                    'name': dict_name_urls[mpurl]['name'],
-                    'party': '',
-                    'constituency': '',
-                    'region': '',
-                    'country': '',
-                    'assumed_office': '',
-                    'years_in_office': '',
-                    'majority': '',
-                    'basic_salary': '',
-                    'lalp_payment': '',
-                }
-
-                os.environ['PATH'] = Config.selenium_path
-                driver = webdriver.Edge(options=Config.selenium_options)
 
                 # SCRAPE PARALLELPARLIAMENT.CO.UK FOR PARTY
+                def scrape_pp(ppurl: str):
+                    os.environ['PATH'] = Config.selenium_path
+                    driver = webdriver.Edge(options=Config.selenium_options)
+                    driver.get(ppurl)
+                
+                    try:
+                        party = driver.find_element(By.CLASS_NAME, 'card-header.text-center').find_element(By.TAG_NAME, 'h4').text.replace('\n','').split(' - ')[0].strip()
+                    except Exception as e:
+                        party = None
+                    
+                    try:
+                        constituency = driver.find_element(By.CLASS_NAME, 'card-header.text-center').find_element(By.TAG_NAME, 'h4').text.replace('\n','').split(' - ')[1].strip()
+                        if 'Former Member' in constituency:
+                            constituency = None
+                        region, country = dict_constituencies[constituency]
+                    except Exception as e:
+                        try:
+                            constituency = driver.find_element(By.CLASS_NAME, 'card-header.text-center').find_element(By.TAG_NAME, 'h4').text
+                            region, country = dict_constituencies[constituency]
+                        except Exception as e:
+                            constituency = None
+                            region, country = None, None
+                            #print('ppurl constituency failed:',e)
+                    
+                    driver.close()
+
+                    return party, constituency, region, country
+
                 ppurl = dict_name_urls[mpurl]['ppurl']
-                driver.get(ppurl)
+                party, constituency, region, country = scrape_pp(ppurl)
+                print('pp_info:',party, constituency, region, country)
 
-                try:
-                    dict_indv_mp['party'] = driver.find_element(By.CLASS_NAME, 'card-header.text-center').find_element(By.TAG_NAME, 'h4').text.replace('\n','').split(' - ')[0].strip()
-                except Exception as e:
-                    #print('ppurl party failed:',e)
-                    pass
+                # SCRAPE THEIPSA.ORG.UK/MP-STAFFING-BUSINESS-COSTS/YOUR-MP/ FOR EXPENSES_2122, EXPENSES_2021, ASSUMED_OFFICE, YEARS_IN_OFFICE, BASIC_SALARY, LALP_PAYMENT
+                def scrape_ipsa(ipsaurl: str):
+
+                    def expenses() -> float:
+                        section = driver.find_elements(By.XPATH,'//*[@id="main-content"]/section/div/div/div[1]/section[3]')[0]
+                        buttons = section.find_elements(By.CLASS_NAME,'govuk-accordion__section-button')
+                        for button in buttons:
+                            if button.text == '2021 to 2022':
+                                button.click()
+                                expenses_2122_list = [e.text for e in section.find_elements(By.CLASS_NAME,'govuk-accordion__section-content') if e.text != ''][0].split('\n')
+                                expenses_2122_list = [e for e in expenses_2122_list if "£"in e]
+                                expenses_2122_list = [float(''.join([i for i in expense if i.isdigit() or i == '.'])) for expense in expenses_2122_list]
+                                expenses_2122 = float(round(sum(expenses_2122_list), 2))
+                                
+                        driver.refresh()
+                            
+                        section = driver.find_elements(By.XPATH,'//*[@id="main-content"]/section/div/div/div[1]/section[3]')[0]
+                        buttons = section.find_elements(By.CLASS_NAME,'govuk-accordion__section-button')
+                        for button in buttons:
+                            if button.text == '2020 to 2021':
+                                button.click()
+                                expenses_2021_list = [e.text for e in section.find_elements(By.CLASS_NAME,'govuk-accordion__section-content') if e.text != ''][0].split('\n')
+                                expenses_2021_list = [e for e in expenses_2021_list if "£"in e]
+                                expenses_2021_list = [float(''.join([i for i in expense if i.isdigit() or i == '.'])) for expense in expenses_2021_list]
+                                expenses_2021 = float(round(sum(expenses_2021_list), 2))
+                        
+                        driver.refresh()
+
+                        return expenses_2122, expenses_2021
+                    
+                    def other_financial_info() -> float:
+                        buttons = driver.find_elements(By.CLASS_NAME,'govuk-accordion__section-button')
+                        for button in buttons:
+                            if button.text == '2020 to 2021':
+                                button.click()
+                        time.sleep(2)
+
+                        buttons = driver.find_elements(By.TAG_NAME, 'button')
+                        for button in buttons:
+                            if button.text == 'MP Payroll information':
+                                button.click()
+                        time.sleep(2)
+
+                        tables = driver.find_elements(By.TAG_NAME,'table')
+                        for table in tables:
+                            if 'Basic salary received during 2020 - 2021' in table.text:
+                                payroll_table = table
+                        for row in payroll_table.find_elements(By.TAG_NAME,'tr'):
+                            if 'Basic salary received during 2020 - 2021' in row.text:
+                                basic_salary = row.text.replace('Basic salary received during 2020 - 2021','').strip()
+                                basic_salary = float(basic_salary.replace('£','').replace(',','').strip())
+                            elif 'Amount paid to MP as LALP during 2020 to 2021' in row.text:
+                                lalp_payment = row.text.replace('Amount paid to MP as LALP during 2020 to 2021','').strip()
+                                lalp_payment = float(lalp_payment.replace('£','').replace(',','').strip())
+                            
+                        driver.refresh()
+                        
+                        return basic_salary, lalp_payment
+                    
+                    def years_in_office() -> int:
+                        assumed_office = parse(driver.find_element(By.CLASS_NAME,'govuk-body-l').text, fuzzy=True).date()
+                        years_in_office = datetime.datetime.now().year - assumed_office.year
+                        years_in_office = int(years_in_office)
+
+                        driver.refresh()
+
+                        return years_in_office
+
+                    os.environ['PATH'] = Config.selenium_path
+                    driver = webdriver.Edge(options=Config.selenium_options)
+                    driver.get(ipsaurl)
+
+                    try:
+                        expenses_2122, expenses_2021 = expenses()
+                    except Exception as e:
+                        expenses_2122, expenses_2021 = None, None
+                        #print('ipsaurl expenses failed:',e)
+                    
+                    try:
+                        basic_salary, lalp_payment = other_financial_info()
+                    except Exception as e:
+                        basic_salary, lalp_payment = None, None
+                        #print('ipsaurl basic salary or lalp_payment failed',e)
+                    
+                    try:
+                        years_in_office = years_in_office()
+                    except Exception as e:
+                        years_in_office = None
+                        #print('ipsaurl years in office failed',e)
+                    
+                    driver.close()
+                                        
+                    return expenses_2122, expenses_2021, basic_salary, lalp_payment, years_in_office
                 
-                try:
-                    dict_indv_mp['constituency'] = driver.find_element(By.CLASS_NAME, 'card-header.text-center').find_element(By.TAG_NAME, 'h4').text.replace('\n','').split(' - ')[1].strip()
-                    dict_indv_mp['region'], dict_indv_mp['country'] = dict_constituencies[dict_indv_mp['constituency']]
-                except Exception as e:
-                    dict_indv_mp['constituency'] = driver.find_element(By.CLASS_NAME, 'card-header.text-center').find_element(By.TAG_NAME, 'h4').text
-                    #print('ppurl constituency failed:',e)
-
-                # SCRAPE THEIPSA.ORG.UK/MP-STAFFING-BUSINESS-COSTS/YOUR-MP/ FOR ASSUMED_OFFICE, YEARS_IN_OFFICE, BASIC_SALARY, LALP_PAYMENT
                 ipsaurl = dict_name_urls[mpurl]['ipsaurl']
-                driver.get(ipsaurl)
-
-                try:
-                    dict_indv_mp['assumed_office'] = parse(driver.find_element(By.CLASS_NAME,'govuk-body-l').text, fuzzy=True).date()
-                    dict_indv_mp['years_in_office'] = datetime.datetime.now().year - dict_indv_mp['assumed_office'].year
-                except Exception as e:
-                    #print('ipsaurl assumed_office failed:',e)
-                    pass
-                
-                try:
-                    buttons = driver.find_elements(By.CLASS_NAME,'govuk-accordion__section-button')
-                    for button in buttons:
-                        if button.text == '2020 to 2021':
-                            button.click()
-                    time.sleep(2)
-
-                    buttons = driver.find_elements(By.TAG_NAME, 'button')
-                    for button in buttons:
-                        if button.text == 'MP Payroll information':
-                            button.click()
-                    time.sleep(2)
-
-                    tables = driver.find_elements(By.TAG_NAME,'table')
-                    for table in tables:
-                        if 'Basic salary received during 2020 - 2021' in table.text:
-                            payroll_table = table
-                    for row in payroll_table.find_elements(By.TAG_NAME,'tr'):
-                        if 'Basic salary received during 2020 - 2021' in row.text:
-                            basic_salary = row.text.replace('Basic salary received during 2020 - 2021','').strip()
-                            dict_indv_mp['basic_salary'] = float(basic_salary.replace('£','').replace(',','').strip())
-                        elif 'Amount paid to MP as LALP during 2020 to 2021' in row.text:
-                            lalp_payment = row.text.replace('Amount paid to MP as LALP during 2020 to 2021','').strip()
-                            dict_indv_mp['lalp_payment'] = float(lalp_payment.replace('£','').replace(',','').strip())
-                except Exception as e:
-                    dict_indv_mp['basic_salary'] = 'Not available'
-                    dict_indv_mp['lalp_payment'] = 'Not available'
-                    #print('ipsaurl basic salary or lalp_payment failed',e)
+                expenses_2122, expenses_2021, basic_salary, lalp_payment, years_in_office = scrape_ipsa(ipsaurl)
+                print('ipsa_info:',expenses_2122, expenses_2021, basic_salary, lalp_payment, years_in_office)
 
                 # SCRAPE WIKIPEDIA FOR MAJORITY
-                try:
-                    wikiurl = dict_name_urls[mpurl]['wikiurl']
+                def scrape_wiki(wikiurl: str):
+                    os.environ['PATH'] = Config.selenium_path
+                    driver = webdriver.Edge(options=Config.selenium_options)   
                     driver.get(wikiurl)
+                    
+                    try:
+                        majority = None
+                        for row in driver.find_elements(By.TAG_NAME,'tr'):
+                            if 'Majority' in row.text:
+                                majority = row.text.replace('Majority','').strip().split(' ')[1].replace('(','').replace('%)','')
+                                majority = float(majority)
+                                break
+                    except Exception as e:
+                        majority = None
+                        #print('wikiurl failed',e)
 
-                    for row in driver.find_elements(By.TAG_NAME,'tr'):
-                        if 'Majority' in row.text:
-                            dict_indv_mp['majority'] = row.text.replace('Majority','').strip().split(' ')[1].replace('(','').replace('%)','')
-                except Exception as e:
-                    #print('wikiurl failed',e)
-                    pass
+                    # Close driver
+                    driver.close()
 
-                # Close driver
-                driver.close()
+                    return majority
 
-                #print('dict_indv_mp: ',dict_indv_mp)
+                wikiurl = dict_name_urls[mpurl]['wikiurl']
+                majority = scrape_wiki(wikiurl)
+                print('wiki_info:',majority)
+
+                dict_indv_mp = {
+                    'name': dict_name_urls[mpurl]['name'],
+                    'party': party,
+                    'constituency': constituency,
+                    'region': region,
+                    'country': country,
+                    'years_in_office': years_in_office,
+                    'majority': majority,
+                    'expenses_2122': expenses_2122,
+                    'expenses_2021': expenses_2021,
+                    'basic_salary': basic_salary,
+                    'lalp_payment': lalp_payment
+                }
 
                 return dict_indv_mp
 
@@ -546,13 +628,17 @@ class Scrape:
                 else:
                     dict_other_info = {}
                     start_index = 0
+                    dict_other_info_file = open('./pkl/dict_other_info.pkl', 'wb')
+                    pickle.dump(dict_other_info, dict_other_info_file)
+                    dict_other_info_file.close()
                 
                 failed_urls = []
                 for mpurl, name_urls in tqdm(list(dict_name_urls.items())[start_index:]):
                     try:
                         dict_other_info = pickle.load(open('./pkl/dict_other_info.pkl','rb'))
                         dict_other_info[mpurl] = get_indv_dict(mpurl) # not very efficient to open/close but this allows for doing this scrape in bursts as it takes a long time (~3-4 hours)
-                        
+                        print('\n',mpurl,dict_other_info[mpurl])
+
                         dict_other_info_file = open('./pkl/dict_other_info.pkl', 'wb')
                         pickle.dump(dict_other_info, dict_other_info_file)
                         dict_other_info_file.close()
@@ -577,6 +663,19 @@ class Scrape:
                 dict_other_info['green_sarah']['constituency'] = 'Chesham and Amersham'
                 dict_other_info['green_sarah']['region'], dict_other_info['green_sarah']['country'] = dict_constituencies[dict_other_info['green_sarah']['constituency']]
 
+                # double-check everything was scraped correctly (sometimes it doesn't always pick everything up - maybe the connection dropped during scraping etc.)
+                for mpurl, other_info in dict_other_info.items():
+                    if None in other_info.values():
+                        dict_other_info[mpurl] = get_indv_dict(mpurl)
+                
+                list_name_urls = [mpurl for mpurl, name_urls in dict_name_urls.items()]
+                list_other_info = [mpurl for mpurl, other_info in dict_other_info.items()]
+
+                missing_mp_list = set(list_name_urls)-set(list_other_info)
+
+                for mp in missing_mp_list:
+                    dict_other_info[mp] = get_indv_dict(mp)
+
                 # SAVE TO PKL
                 dict_other_info_file = open('./pkl/dict_other_info.pkl', 'wb')
                 pickle.dump(dict_other_info, dict_other_info_file)
@@ -588,6 +687,7 @@ class Scrape:
                 dict_other_info = pickle.load(open('./pkl/dict_other_info.pkl','rb'))
                 try:
                     dict_other_info[mpurl] = get_indv_dict(mpurl)
+                    print(dict_other_info[mpurl])
                 except Exception as e:
                     #print('get_indv_mp failed:',e)
                     pass
@@ -705,7 +805,7 @@ class Extract:
                         if date_parsed < mpfi_date_minus_one_year:
                             total_money_ytd = float(0)
                         else:
-                            total_money_ytd = money_raw_value
+                            total_money_ytd = float(money_raw_value)
                     except:
                         start_date_ytd, end_date_ytd = Extract.date_processor(dict_line)
                         total_money_for_one_year = money_raw_value*period_dict[money_period]
@@ -714,7 +814,7 @@ class Extract:
                             if percentage_of_year_elapsed == 0.0:                    # for a single date, start_date_ytd = end_date_ytd and percentage_.. = 0
                                 total_money_ytd = float(0)
                             else:
-                                total_money_ytd = round(total_money_for_one_year*percentage_of_year_elapsed)
+                                total_money_ytd = float(round(total_money_for_one_year*percentage_of_year_elapsed))
                         except:                                                       # if date_processor returns None's
                             total_money_ytd = 'MANUAL_CHECK'
                 else:                                                                 # for recurring sums (i.e. D, W, 2W, M, Q, Y)
@@ -725,7 +825,7 @@ class Extract:
                         if percentage_of_year_elapsed == 0.0:                         # for a single date, start_date_ytd = end_date_ytd and percentage_.. = 0
                             total_money_ytd = float(0)
                         else:
-                            total_money_ytd = round(total_money_for_one_year*percentage_of_year_elapsed)
+                            total_money_ytd = float(round(total_money_for_one_year*percentage_of_year_elapsed))
                     except:                                                          # if date_processor returns None's
                         total_money_ytd = None
 
@@ -737,7 +837,7 @@ class Extract:
         except:
             pass
 
-        return total_money_ytd                    
+        return total_money_ytd         
     
     def total_time_ytd(dict_line: str) -> int: ## dict_line => total_money_ytd
 
@@ -868,7 +968,7 @@ class Extract:
                         if date_parsed < mpfi_date_minus_one_year:
                             total_time_ytd = float(0)
                         else:
-                            total_time_ytd = time_raw_value
+                            total_time_ytd = float(time_raw_value)
                     except:
                         start_date_ytd, end_date_ytd = Extract.date_processor(dict_line)
                         total_time_for_one_year = time_raw_value*period_dict[time_period]
@@ -877,7 +977,7 @@ class Extract:
                             if percentage_of_year_elapsed == 0.0:                    # for a single date, start_date_ytd = end_date_ytd and percentage_.. = 0
                                 total_time_ytd = float(0)
                             else:
-                                total_time_ytd = round(total_time_for_one_year*percentage_of_year_elapsed, 2)
+                                total_time_ytd = float(round(total_time_for_one_year*percentage_of_year_elapsed, 2))
                         except:                                                       # if date_processor returns None's
                             total_time_ytd = None
                 else:                                                                 # for recurring sums (i.e. D, W, 2W, M, Q, Y)
@@ -888,7 +988,7 @@ class Extract:
                         if percentage_of_year_elapsed == 0.0:                         # for a single date, start_date_ytd = end_date_ytd and percentage_.. = 0
                             total_time_ytd = float(0)
                         else:
-                            total_time_ytd = round(total_time_for_one_year*percentage_of_year_elapsed, 2)
+                            total_time_ytd = float(round(total_time_for_one_year*percentage_of_year_elapsed, 2))
                     except:                                                          # if date_processor returns None's
                         total_time_ytd = None
 
@@ -911,14 +1011,14 @@ class Extract:
         except Exception as e:
             parsed_lines_mp = [{
                             'name':dict_name_urls[mpurl]['name'],
-                            'full_text':'N/A',
-                            'date':'N/A',
-                            'orgs':'N/A',
-                            'money':float(0),
-                            'time':float(0),
-                            'role':'N/A',
-                            'total_money_ytd':float(0),
-                            'total_time_ytd':float(0),
+                            'full_text':None,
+                            'date':None,
+                            'orgs':None,
+                            'money':None,
+                            'time':None,
+                            'role':None,
+                            'total_money_ytd':None,
+                            'total_time_ytd':None,
                             'parlukurl':dict_name_urls[mpurl]['parlukurl']
                             }]
             
@@ -954,11 +1054,10 @@ class Extract:
                 dict_line['role'] = [ent.text for ent in doc.ents if ent.label_ == 'ROLE']
 
                 #print(dict_line)
+                total_money_ytd = Extract.total_money_ytd(dict_line)
+                total_time_ytd = Extract.total_time_ytd(dict_line)
 
-                dict_line['total_money_ytd'] = Extract.total_money_ytd(dict_line)
-                dict_line['total_time_ytd'] = Extract.total_time_ytd(dict_line)
-
-                if dict_line['total_money_ytd'] == 'MANUAL_CHECK' or dict_line['total_time_ytd'] == 'MANUAL_CHECK':
+                if 'total_money_ytd' == 'MANUAL_CHECK' or 'total_time_ytd' == 'MANUAL_CHECK':
                     del dict_line['total_money_ytd']
                     del dict_line['total_time_ytd']
 
@@ -975,8 +1074,11 @@ class Extract:
                     dict_line['money'] = [new_money]
                     dict_line['time'] = [new_time]
 
-                    dict_line['total_money_ytd'] = Extract.total_money_ytd(dict_line)
-                    dict_line['total_time_ytd'] = Extract.total_time_ytd(dict_line)
+                    total_money_ytd = Extract.total_money_ytd(dict_line)
+                    total_time_ytd = Extract.total_time_ytd(dict_line)
+
+                dict_line['total_money_ytd'] = float(total_money_ytd)
+                dict_line['total_time_ytd'] = float(total_time_ytd)
 
                 if indent == 'i':
                     i_fulltext = dict_line['full_text']
@@ -991,11 +1093,11 @@ class Extract:
                     i_list.append('i2')
 
                 # formatting date and money fields back to strings (from lists) to export to DataFrame
-                dict_line['orgs'] = ', '.join(dict_line['orgs'])
-                dict_line['date'] = ', '.join(dict_line['date'])
-                dict_line['money'] = ', '.join(dict_line['money'])  
-                dict_line['time'] = ', '.join(dict_line['time']) 
-                dict_line['role'] = ', '.join(dict_line['role'])
+                dict_line['orgs'] = str(', '.join(dict_line['orgs']))
+                dict_line['date'] = str(', '.join(dict_line['date']))
+                dict_line['money'] = str(', '.join(dict_line['money']))
+                dict_line['time'] = str(', '.join(dict_line['time']))
+                dict_line['role'] = str(', '.join(dict_line['role']))
 
                 # finally, append dict_line to list_mpdata
                 parsed_lines_mp.append(dict_line)
@@ -1040,16 +1142,16 @@ class Extract:
             mpfi_lines = mpfi[cat]
         except Exception as e:
             parsed_lines_mp = [{
-                            'name':dict_name_urls[mpurl]['name'],
-                            'full_text':'N/A',
-                            'date':'N/A',
-                            'orgs':'N/A',
-                            'money':float(0),
-                            'time':float(0),
-                            'role':'N/A',
-                            'total_money_ytd':float(0),
-                            'total_time_ytd':float(0),
-                            'parlukurl':dict_name_urls[mpurl]['parlukurl']
+                            'name':str(dict_name_urls[mpurl]['name']),
+                            'full_text':None,
+                            'date':None,
+                            'orgs':None,
+                            'money':None,
+                            'time':None,
+                            'role':None,
+                            'total_money_ytd':None,
+                            'total_time_ytd':None,
+                            'parlukurl':str(dict_name_urls[mpurl]['parlukurl'])
                             }]
             #print(mpurl,e)
             return parsed_lines_mp
@@ -1077,8 +1179,11 @@ class Extract:
 
                 #print(dict_line)
 
-                dict_line['total_money_ytd'] = Extract.total_money_ytd(dict_line)
-                dict_line['total_time_ytd'] = Extract.total_time_ytd(dict_line)
+                total_money_ytd = Extract.total_money_ytd(dict_line)
+                total_time_ytd = Extract.total_time_ytd(dict_line)
+
+                dict_line['total_money_ytd'] = float(total_money_ytd)
+                dict_line['total_time_ytd'] = float(total_time_ytd)
 
                 if indent == 'i':
                     i_fulltext = dict_line['full_text']
@@ -1093,11 +1198,11 @@ class Extract:
                     i_list.append('i2')
 
                 # formatting date and money fields back to strings (from lists) to export to DataFrame
-                dict_line['orgs'] = ', '.join(dict_line['orgs'])
-                dict_line['date'] = ', '.join(dict_line['date'])
-                dict_line['money'] = ', '.join(dict_line['money'])  
-                dict_line['time'] = ', '.join(dict_line['time']) 
-                dict_line['role'] = ', '.join(dict_line['role'])
+                dict_line['orgs'] = str(', '.join(dict_line['orgs']))
+                dict_line['date'] = str(', '.join(dict_line['date']))
+                dict_line['money'] = str(', '.join(dict_line['money']))  
+                dict_line['time'] = str(', '.join(dict_line['time']))
+                dict_line['role'] = str(', '.join(dict_line['role']))
 
                 # finally, append dict_line to list_mpdata
                 parsed_lines_mp.append(dict_line)
@@ -1124,8 +1229,11 @@ class Extract:
             dict_line['time'] = input_time
             dict_line['role'] = input_role
 
-            dict_line['total_money_ytd'] = Extract.total_money_ytd(dict_line)
-            dict_line['total_time_ytd'] = Extract.total_time_ytd(dict_line)
+            total_money_ytd = Extract.total_money_ytd(dict_line)
+            total_time_ytd = Extract.total_time_ytd(dict_line)
+
+            dict_line['total_money_ytd'] = float(total_money_ytd)
+            dict_line['total_time_ytd'] = float(total_time_ytd)
 
             if indent == 'i':
                 i_fulltext = dict_line['full_text']
@@ -1140,11 +1248,11 @@ class Extract:
                 i_list.append('i2')
             
             # formatting date and money fields back to strings (from lists) to export to DataFrame
-            dict_line['orgs'] = ', '.join(dict_line['orgs'])
-            dict_line['date'] = ', '.join(dict_line['date'])
-            dict_line['money'] = ', '.join(dict_line['money'])  
-            dict_line['time'] = ', '.join(dict_line['time']) 
-            dict_line['role'] = ', '.join(dict_line['role'])
+            dict_line['orgs'] = str(', '.join(dict_line['orgs']))
+            dict_line['date'] = str(', '.join(dict_line['date']))
+            dict_line['money'] = str(', '.join(dict_line['money']))  
+            dict_line['time'] = str(', '.join(dict_line['time']))
+            dict_line['role'] = str(', '.join(dict_line['role']))
 
             parsed_lines_mp.append(dict_line)
         
@@ -1188,24 +1296,25 @@ class Export:
         df_sum_moneytime = pd.DataFrame(dict_sum_moneytime).transpose()
 
         df_mp_overview = pd.concat([df_sum_moneytime, df_other_info], axis=1)
-        df_mp_overview = df_mp_overview[["name", "sum_money_ytd","sum_time_ytd","basic_salary","lalp_payment","party","constituency","region","country","assumed_office","years_in_office","majority"]]
+        df_mp_overview = df_mp_overview[["name","party","constituency","sum_money_ytd","sum_time_ytd","basic_salary","lalp_payment","expenses_2122","expenses_2021","region","country","years_in_office","majority"]]
         df_mp_overview = df_mp_overview.rename(columns = {
             'name':'Name',
-            'sum_money_ytd':'Total Earnings YTD (£)',
-            'sum_time_ytd': 'Total Hours Worked YTD',
-            'basic_salary': 'Basic MP Salary (2020-21)',
-            'lalp_payment': 'LALP (2020-21)',
             'party':'Political Party',
             'constituency':'Constituency',
+            'sum_money_ytd':'Secondary Earnings YTD (£)',
+            'sum_time_ytd': 'Secondary Hours Worked YTD',
+            'basic_salary': 'Basic MP Salary (2020-21)',
+            'lalp_payment': 'LALP (2020-21)',
+            'expenses_2122': 'Expenses (2021-22)',
+            'expenses_2021': 'Expenses (2020-21)',
             'region':'Region',
             'country':'Country',
-            'assumed_office':'Date Assumed Office',
             'years_in_office': 'Years in Office',
             'majority': 'Majority (%)'
         })
         df_mp_overview = df_mp_overview.set_index('Name')
         df_mp_overview = df_mp_overview.sort_index(ascending=True)
-        df_mp_overview = df_mp_overview.fillna(0)
+        #df_mp_overview = df_mp_overview.fillna(0)
 
         # SHEET 2 - EARNINGS BREAKDOWN - create df from list_lines and re-name columns
         list_lines = []
@@ -1214,8 +1323,8 @@ class Export:
                 list_lines.append(line)    
 
         df_mpfi = pd.DataFrame(list_lines)
-        df_earnings_breakdown = df_mpfi[["name","orgs","role","money","time","date","total_money_ytd","total_time_ytd","full_text","parlukurl"]]
-        df_earnings_breakdown = df_earnings_breakdown.rename(columns={
+        df_second_jobs = df_mpfi[["name","orgs","role","money","time","date","total_money_ytd","total_time_ytd","parlukurl"]]
+        df_second_jobs = df_second_jobs.rename(columns={
             'name':'Name',
             'money':'Earnings (RAW)',
             'time':'Hours worked (RAW)',
@@ -1224,14 +1333,13 @@ class Export:
             'role':'Role',
             'total_money_ytd':'Earnings YTD (£)',
             'total_time_ytd':'Hours worked YTD',
-            'full_text':'Original text',
             'parlukurl':'Source'
         })
-        df_earnings_breakdown = df_earnings_breakdown.set_index('Name')
-        df_earnings_breakdown = df_earnings_breakdown.sort_index(ascending=True)
-        df_earnings_breakdown = df_earnings_breakdown.fillna(0)
+        df_second_jobs = df_second_jobs.set_index('Name')
+        df_second_jobs = df_second_jobs.sort_index(ascending=True)
+        #df_second_jobs = df_second_jobs.fillna(0)
 
-        return df_mp_overview, df_earnings_breakdown
+        return df_mp_overview, df_second_jobs
 
     def xlsx(workbook_name: str, func) -> None:
         
@@ -1242,7 +1350,7 @@ class Export:
         workbook = writer.book
         worksheet0 = workbook.add_worksheet('Intro')
         df1.to_excel(writer, sheet_name='MP overview')
-        df2.to_excel(writer, sheet_name='Earnings breakdown')
+        df2.to_excel(writer, sheet_name='Second jobs')
 
         # Sheet 0
         worksheet0.set_column('A:A', 110)
@@ -1253,16 +1361,18 @@ class Export:
         worksheet0.write('A1','MP FINANCIAL INTERESTS DATA - STRUCTURED',title)
         worksheet0.write('A2','by Andrew Kyriacos-Messios',sub_title)
         worksheet0.write('A4','Sheet 1: MP Overview - Totals of second job MP earnings and hours worked for the year-to-date',title)
-        worksheet0.write('A5','Total Earnings YTD (£) - Total declared employment earnings outside of MP work in the last year',sub_title)
-        worksheet0.write('A6','Total Hours Worked YTD - Total declared hours spent working outside of MP work in the last year',sub_title)
-        worksheet0.write('A7','Basic MP Salary (2020-21) - Salary received as a Member of Parliament in 2020-21 (not included in Total Earnings YTD)',sub_title)
-        worksheet0.write('A8','LALP (2020-21) - Sum received as a London Area Living Payment adjustment in 2020-21',sub_title)
         worksheet0.write('A9','Political Party',sub_title)
         worksheet0.write('A10','Constituency, Region, Country',sub_title)
+        worksheet0.write('A5','Secondary Earnings YTD (£) - Total declared employment earnings outside of MP work in the last year',sub_title)
+        worksheet0.write('A6','Secondary Hours Worked YTD - Total declared hours spent working outside of MP work in the last year',sub_title)
+        worksheet0.write('A7','Basic MP Salary (2020-21) - Salary received as a Member of Parliament in 2020-21 (not included in Total Earnings YTD)',sub_title)
+        worksheet0.write('A8','LALP (2020-21) - Sum received as a London Area Living Payment adjustment in 2020-21',sub_title)
+        worksheet0.write('A9','Expenses (2021-22) - Expenses claimed in 2021-22',sub_title)
+        worksheet0.write('A10','Expenses (2020-21) - Expenses claimed in 2020-21',sub_title)
         worksheet0.write('A11','Date Assumed Office and Years in Office',sub_title)
         worksheet0.write('A12','Majority - % majority won in last election',sub_title)  
         
-        worksheet0.write('A14','Sheet 2: Earnings breakdown - A line-by-line breakdown for sources of earnings for each MP',title)
+        worksheet0.write('A14','Sheet 2: Second jobs breakdown - A line-by-line breakdown for sources of secondary earnings for each MP',title)
         worksheet0.write('A15','Client, Role',sub_title)
         worksheet0.write('A16','Earnings (RAW) - Payment amount declared by MP (e.g. £150, £2,000 per month)',sub_title)
         worksheet0.write('A17','Hours Worked (RAW) - hours worked declared by MP (e.g. 30 mins, 10 hrs per month)',sub_title)
@@ -1281,40 +1391,6 @@ class Export:
         worksheet0.write('A31','https://theipsa.org.uk/')
         worksheet0.write('A32','https://en.wikipedia.org/wiki/Diane_Abbott')
         worksheet0.write('A33','https://dbpedia.org/page/')
-
-        # Sheet 1 - MP Overview
-        format_all_columns = workbook.add_format({'align':'center'})
-        format_currency = workbook.add_format({'align':'center', 'num_format': "£#,##0.00", 'bold': True})
-        format_time = workbook.add_format({'align':'center', 'bold': True})
-        format_timedate = workbook.add_format({'align':'center', 'num_format': 'dd mmmm yyyy'})
-
-        worksheet1 = writer.sheets['MP overview']
-
-        worksheet1.set_column(0, 0, 25, format_all_columns) # name
-        worksheet1.set_column(1, 1, 20, format_currency) # sum_money_ytd
-        worksheet1.set_column(2, 2, 20, format_time) # sum_time_ytd
-        worksheet1.set_column(3, 3, 22.5, format_currency) # basic_salary
-        worksheet1.set_column(4, 4, 15, format_currency) # lalp_payment
-        worksheet1.set_column(5, 5, 15, format_all_columns) # party
-        worksheet1.set_column(6, 6, 40, format_all_columns) # constituency
-        worksheet1.set_column(7, 7, 25, format_all_columns) # region
-        worksheet1.set_column(8, 8, 15, format_all_columns) # country
-        worksheet1.set_column(9, 9, 20, format_timedate) # assumed_office
-        worksheet1.set_column(10, 10, 15, format_all_columns) # years_in_office
-        worksheet1.set_column(11, 11, 15, format_all_columns) # majority
-
-        # Sheet 2 - Earnings breakdown
-        worksheet2 = writer.sheets['Earnings breakdown']
-        worksheet2.set_column(0, 0, 25, format_all_columns) # name
-        worksheet2.set_column(1, 1, 40, format_all_columns) # organisation
-        worksheet2.set_column(2, 2, 40, format_all_columns) # role
-        worksheet2.set_column(3, 3, 20, format_all_columns) # earnings_raw
-        worksheet2.set_column(4, 4, 20, format_all_columns) # hours_raw
-        worksheet2.set_column(5, 5, 40, format_all_columns) # date
-        worksheet2.set_column(6, 6, 20, format_currency) # total_money_ytd
-        worksheet2.set_column(7, 7, 20, format_time) # total_time_ytd
-        worksheet2.set_column(8, 8, 100, format_all_columns) # full_text
-        worksheet2.set_column(9, 9, 100, format_all_columns) # source
 
         # save and close
         writer.save()
