@@ -1369,7 +1369,7 @@ class Export:
         worksheet0.write('A8','LALP (2020-21) - Sum received as a London Area Living Payment adjustment in 2020-21',sub_title)
         worksheet0.write('A9','Expenses (2021-22) - Expenses claimed in 2021-22',sub_title)
         worksheet0.write('A10','Expenses (2020-21) - Expenses claimed in 2020-21',sub_title)
-        worksheet0.write('A11','Date Assumed Office and Years in Office',sub_title)
+        worksheet0.write('A11','Years in Office',sub_title)
         worksheet0.write('A12','Majority - % majority won in last election',sub_title)  
         
         worksheet0.write('A14','Sheet 2: Second jobs breakdown - A line-by-line breakdown for sources of secondary earnings for each MP',title)
@@ -1379,7 +1379,6 @@ class Export:
         worksheet0.write('A18','Date of Earnings - Date on which payment was received or dates between which ongoing work occurred',sub_title)
         worksheet0.write('A19','Earnings YTD (£) - Approximation of % of payment received in the last year (e.g. annual salary * % of year elapsed)',sub_title)
         worksheet0.write('A20','Hours Worked YTD - Approximation of % of hours worked in the last year (e.g. annual time commitment * % of year elapsed)',sub_title)
-        worksheet0.write('A21','Original text - Original text from the Register of MP Financial Interests',sub_title)
         worksheet0.write('A22','Source - Hyperlink to the corresponding record in the Register of MP Financial Interests',sub_title)
 
         worksheet0.write('A24','Journalists and researchers: please double-check data and cross-reference against the original material before publishing.',title)
