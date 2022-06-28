@@ -21,7 +21,7 @@ class Config:
         -> e.g. {'c1':'1. Employment and earnings'}
     """ 
 
-    selenium_path = r"C:/selenium_drivers/edgedriver_win64_101"
+    selenium_path = r"C:/selenium_drivers/edgedriver_win64_103"
     selenium_options = Options()
     selenium_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.41 Safari/537.36 Edg/101.0.1210.32")
 
@@ -1421,7 +1421,7 @@ if __name__ == "__main__":
     print('Scraping links...')
     failed_urls_links = Scrape.links(date)
 
-    print('Scraping MPFI...')
+    # print('Scraping MPFI...')
     failed_urls_mpfi = Scrape.mpfi()
 
     print('Extracting...')
