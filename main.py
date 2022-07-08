@@ -341,7 +341,7 @@ class Scrape:
 
             return dict_dburls
 
-        dict_url_nameparlukurl = parluk('220228')
+        dict_url_nameparlukurl = parluk(date)
         dict_ppurl = pp(dict_url_nameparlukurl)
         dict_wikiurl = wiki(dict_url_nameparlukurl)
         dict_dburl = db(dict_url_nameparlukurl,dict_wikiurl)
@@ -1400,6 +1400,7 @@ if __name__ == "__main__":
     print('loading dates...')
     date = sys.argv[1]
     date_words = sys.argv[2]
+    print('date: ',date,' / date_words: ',date_words)
     election_date = '191212'
     election_date_words = '12 December 19'
     mpfi_date = dateutil.parser.parse(date, yearfirst=True)
